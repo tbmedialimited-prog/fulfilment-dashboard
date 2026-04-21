@@ -33,7 +33,7 @@ module.exports = async (req, res) => {
 
   // Royal Mail — direct header auth, no OAuth
   try {
-    const r = await axios.get('https://api.royalmail.net/mailpieces/v2/TEST123456GB/events', {
+    const r = await axios.get('https://api.royalmail.net/mailpieces/v2/IV746280456GB/events', {
       headers: {
         'X-IBM-Client-Id':     process.env.RM_API_KEY,
         'X-IBM-Client-Secret': process.env.RM_API_SECRET,
@@ -46,8 +46,9 @@ module.exports = async (req, res) => {
   } catch (err) {
     const s = err.response?.status;
     // 404/400 = auth worked, tracking number just not found
+    const noRoute = (err.response?.data?.moreInformation || '').includes('No resources match');
     results.royalMail = {
-      ok: [404, 400].includes(s),
+      ok: [404, 400].includes(s) || noRoute,
       status: s,
       body: JSON.stringify(err.response?.data || err.message).slice(0, 300),
     };

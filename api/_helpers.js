@@ -17,24 +17,54 @@ function mintsoftClient() {
 
 async function fetchMintsoftOrders(dateFrom, dateTo) {
   const client = mintsoftClient();
-  const attempts = [
-    { path: '/api/Order/List', params: { DateFrom: dateFrom, DateTo: dateTo, pageSize: 500 } },
-    { path: '/api/Order',      params: { DateFrom: dateFrom, DateTo: dateTo, pageSize: 500 } },
-    { path: '/api/Order',      params: { dateFrom, dateTo, pageSize: 500 } },
-  ];
 
-  let lastErr;
-  for (const { path, params } of attempts) {
-    try {
-      const r = await client.get(path, { params });
-      const raw = r.data?.Orders || r.data?.Result || r.data?.Data || r.data;
-      return Array.isArray(raw) ? raw : [];
-    } catch (err) {
-      lastErr = err;
-      if (![401, 403, 404, 405].includes(err.response?.status)) throw err;
+  // Mintsoft paginates — fetch all pages until we get fewer results than pageSize
+  const PAGE_SIZE = 100;
+  const allOrders = [];
+  let page = 1;
+  let keepGoing = true;
+
+  // Find the working endpoint on first request, then reuse it
+  let workingPath = null;
+  const candidatePaths = ['/api/Order/List', '/api/Order'];
+
+  while (keepGoing) {
+    let data = null;
+    let lastErr;
+
+    const paths = workingPath ? [workingPath] : candidatePaths;
+
+    for (const path of paths) {
+      try {
+        const r = await client.get(path, {
+          params: { DateFrom: dateFrom, DateTo: dateTo, pageSize: PAGE_SIZE, pageNumber: page },
+        });
+        data = r.data;
+        workingPath = path; // remember which path worked
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (![404, 405].includes(err.response?.status)) throw err;
+      }
+    }
+
+    if (!data) throw lastErr;
+
+    const raw = data?.Orders || data?.Result || data?.Data || data;
+    const pageOrders = Array.isArray(raw) ? raw : [];
+    allOrders.push(...pageOrders);
+
+    // Stop if we got fewer than a full page (last page)
+    if (pageOrders.length < PAGE_SIZE) {
+      keepGoing = false;
+    } else {
+      page++;
+      // Safety cap at 20 pages (2000 orders) to avoid Vercel timeout
+      if (page > 20) keepGoing = false;
     }
   }
-  throw lastErr;
+
+  return allOrders;
 }
 
 // ─── Royal Mail: no OAuth needed ─────────────────────────────────────────────

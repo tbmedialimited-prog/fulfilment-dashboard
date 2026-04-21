@@ -18,7 +18,7 @@ module.exports = async (req, res) => {
       .catch(e => { if (e.response?.status !== 401) checks.dpdLocal = true; }),
 
     // RM: test with a dummy tracking number — 404 means auth worked, 401 means bad creds
-    axios.get('https://api.royalmail.net/mailpieces/v2/TEST123456GB/events', {
+    axios.get('https://api.royalmail.net/mailpieces/v2/IV746280456GB/events', {
       headers: {
         'X-IBM-Client-Id':     process.env.RM_API_KEY,
         'X-IBM-Client-Secret': process.env.RM_API_SECRET,
