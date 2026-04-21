@@ -10,49 +10,40 @@ module.exports = async (req, res) => {
   const now = new Date();
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
-  // Test all possible pagination workarounds
+  // Test SortOldestFirst pagination - confirmed by Mintsoft support
   try {
     const weekAgo = new Date(now - 7*86400000);
 
-    // 1. ClientId filter - does fetching per client give different orders?
-    const clientR = await client.get('/Client');
-    const allClients = Array.isArray(clientR.data) ? clientR.data : [];
-    const testClients = allClients.slice(0, 5);
-    const clientIds = new Set();
-    for (const c of testClients) {
-      const r = await client.get('/Order/List', { params: { DateFrom: weekAgo.toISOString(), DateTo: now.toISOString(), pageSize: 100, ClientId: c.ID || c.Id } });
-      (Array.isArray(r.data) ? r.data : []).forEach(o => clientIds.add(o.ID));
-    }
-    const defaultR = await client.get('/Order/List', { params: { DateFrom: weekAgo.toISOString(), DateTo: now.toISOString(), pageSize: 100 } });
-    const defaultIds = new Set((Array.isArray(defaultR.data) ? defaultR.data : []).map(o => o.ID));
-    results.client_filter = {
-      unique_across_5_clients: clientIds.size,
-      default_count: defaultIds.size,
-      works: clientIds.size > defaultIds.size
+    // Page 1 - oldest 100
+    const r1 = await client.get('/Order/List', {
+      params: { DateFrom: weekAgo.toISOString(), ToDate: now.toISOString(), pageSize: 100, SortOldestFirst: true }
+    });
+    const p1 = Array.isArray(r1.data) ? r1.data : [];
+    const ids1 = p1.map(o=>o.ID);
+    const latestDate1 = p1.reduce((max,o) => o.OrderDate > max ? o.OrderDate : max, '');
+    results.page1_oldest = {
+      count: p1.length,
+      id_range: ids1.length ? `${Math.min(...ids1)}-${Math.max(...ids1)}` : 'empty',
+      latest_date: latestDate1
     };
 
-    // 2. WarehouseId filter
-    const whR = await client.get('/Warehouse').catch(() => ({ data: [] }));
-    const warehouses = Array.isArray(whR.data) ? whR.data : [];
-    results.warehouses_found = warehouses.length;
-    if (warehouses.length > 0) {
-      const wR = await client.get('/Order/List', { params: { DateFrom: weekAgo.toISOString(), DateTo: now.toISOString(), pageSize: 100, WarehouseId: warehouses[0].ID } });
-      const wOrders = Array.isArray(wR.data) ? wR.data : [];
-      results.warehouse_filter = { count: wOrders.length, different: wOrders[0]?.ID !== [...defaultIds][0] };
+    // Page 2 - advance window past latest date from page 1
+    if(latestDate1) {
+      const nextStart = new Date(new Date(latestDate1).getTime()+1).toISOString();
+      const r2 = await client.get('/Order/List', {
+        params: { DateFrom: nextStart, ToDate: now.toISOString(), pageSize: 100, SortOldestFirst: true }
+      });
+      const p2 = Array.isArray(r2.data) ? r2.data : [];
+      const ids2 = p2.map(o=>o.ID);
+      results.page2_oldest = {
+        count: p2.length,
+        id_range: ids2.length ? `${Math.min(...ids2)}-${Math.max(...ids2)}` : 'empty',
+        different_from_page1: !ids1.includes(ids2[0])
+      };
+      results.pagination_works = p2.length > 0 && !ids1.includes(p2[0]?.ID);
     }
 
-    // 3. LastUpdated filter - try fetching orders updated in last hour, then last 2 hours etc
-    const oneHourAgo = new Date(now - 3600000);
-    const lR = await client.get('/Order/List', { params: { LastUpdatedFrom: oneHourAgo.toISOString(), pageSize: 100 } });
-    const lOrders = Array.isArray(lR.data) ? lR.data : [];
-    results.lastUpdated_filter = { count: lOrders.length, sample_id: lOrders[0]?.ID };
-
-    // 4. AtNewDate filter (the AtNewDate field exists in responses)
-    const anR = await client.get('/Order/List', { params: { AtNewDateFrom: weekAgo.toISOString(), AtNewDateTo: now.toISOString(), pageSize: 100 } });
-    const anOrders = Array.isArray(anR.data) ? anR.data : [];
-    results.atNewDate_filter = { count: anOrders.length, different: anOrders[0]?.ID !== [...defaultIds][0] };
-
-  } catch(e) { results.workaround_tests = { error: e.message }; }
+  } catch(e) { results.sort_oldest_test = { error: e.message }; }
 
   // Test 6: Client list
   try {

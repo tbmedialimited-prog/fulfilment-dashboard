@@ -38,50 +38,50 @@ module.exports = async (req, res) => {
       });
     }catch{}
 
-    // Mintsoft caps at 100 results and time-chunk filtering doesn't work reliably.
-    // Solution: fetch page 1, get the lowest ID, then fetch with MaxId = lowestId-1
-    // to get the next 100, repeat until we have all orders in the date range.
+    // Mintsoft pagination using SortOldestFirst + sliding DateFrom window.
+    // Fetch oldest 100, advance DateFrom to last order's date, repeat.
     const seen=new Set();
     const allOrders=[];
-    let maxId=null; // null = no filter on first request
+    let windowStart=dateFrom;
+    const windowEnd=dateTo;
     let keepGoing=true;
-    const startDate=new Date(dateFrom);
-    const endDate=new Date(dateTo);
 
     while(keepGoing){
       try{
-        const params={DateFrom:dateFrom,DateTo:dateTo,pageSize:100};
-        if(maxId!==null) params.MaxId=maxId;
-        const r=await MS.get('/Order/List',{params});
+        const r=await MS.get('/Order/List',{
+          params:{ DateFrom:windowStart, ToDate:windowEnd, pageSize:100, SortOldestFirst:true }
+        });
         const page=Array.isArray(r.data)?r.data:[];
 
         let newCount=0;
-        let lowestId=Infinity;
+        let latestDate=windowStart;
+
         for(const o of page){
           const id=String(o.ID||'');
           if(id&&!seen.has(id)){
             seen.add(id);
             allOrders.push(o);
             newCount++;
-            if(o.ID<lowestId) lowestId=o.ID;
+            // Track the latest OrderDate in this page to advance the window
+            if(o.OrderDate && o.OrderDate > latestDate) latestDate=o.OrderDate;
           }
         }
 
-        // Stop if: fewer than 100 results, no new orders, or oldest order is before our range
-        if(page.length<100||newCount===0||lowestId===Infinity){
+        if(page.length<100||newCount===0){
+          // Last page or no new orders
+          keepGoing=false;
+        } else if(latestDate===windowStart){
+          // Date didn't advance - avoid infinite loop
           keepGoing=false;
         } else {
-          // Check if oldest order in page is within our date range
-          const oldestOrder=page.find(o=>o.ID===lowestId);
-          const oldestDate=oldestOrder?new Date(oldestOrder.OrderDate||0):startDate;
-          if(oldestDate<startDate){
-            keepGoing=false;
-          } else {
-            maxId=lowestId-1; // fetch next batch below this ID
-          }
+          // Advance window to just after the latest order we saw
+          // Add 1ms to avoid re-fetching the boundary order
+          const nextStart=new Date(new Date(latestDate).getTime()+1).toISOString();
+          windowStart=nextStart;
         }
-        if(allOrders.length>=5000) keepGoing=false;
-      }catch{keepGoing=false;}
+
+        if(allOrders.length>=10000) keepGoing=false;
+      }catch{ keepGoing=false; }
     }
 
     // Normalise
