@@ -12,6 +12,7 @@ function mintsoftClient() {
       'Ms-Apikey':    process.env.MINTSOFT_API_KEY,
       'Accept':       'application/json',
       'Content-Type': 'application/json',
+      'User-Agent':   'FulfilmentExperts-Dashboard/1.0',
     },
     timeout: 20000,
   });

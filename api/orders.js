@@ -1,9 +1,13 @@
-// v8 - full chunk pagination inline, no _helpers dependency for fetching
+// v10 - per-client pagination with strict client-side date filtering
 const axios = require('axios');
 
 const MS = axios.create({
   baseURL: 'https://api.mintsoft.co.uk/api',
-  headers: { 'Ms-Apikey': process.env.MINTSOFT_API_KEY, Accept: 'application/json' },
+  headers: {
+    'Ms-Apikey':  process.env.MINTSOFT_API_KEY,
+    'Accept':     'application/json',
+    'User-Agent': 'FulfilmentExperts-Dashboard/1.0',
+  },
   timeout: 20000,
 });
 
@@ -13,6 +17,7 @@ function detectCarrier(n=''){
   if(n.includes('royal mail')||n.includes('royalmail')||n.startsWith('rm ')) return 'Royal Mail';
   return n||'Other';
 }
+
 function deriveStatus(o){
   if(o.DespatchDate) return 'In transit';
   const sid=o.OrderStatusId||0;
@@ -26,123 +31,80 @@ module.exports = async (req, res) => {
 
   const dateFrom = req.query.from || new Date(Date.now()-7*86400000).toISOString();
   const dateTo   = req.query.to   || new Date().toISOString();
+  const startMs  = new Date(dateFrom).getTime();
+  const endMs    = new Date(dateTo).getTime();
 
   try {
-    // Fetch client map
+    // Fetch client list
     let clientMap={};
+    let clientIds=[];
     try{
       const cr=await MS.get('/Client');
-      (Array.isArray(cr.data)?cr.data:[]).forEach(c=>{
+      const clients=Array.isArray(cr.data)?cr.data:[];
+      clients.forEach(c=>{
         const id=String(c.ID||c.Id||'');
-        if(id) clientMap[id]=c.Name||c.ClientName||c.CompanyName||id;
+        if(id){
+          clientMap[id]=c.Name||c.ClientName||c.CompanyName||id;
+          clientIds.push(id);
+        }
       });
     }catch{}
 
-    // Strategy 1: SortOldestFirst sliding window (confirmed by Mintsoft support)
-    // Fetch oldest 100, advance DateFrom past last order, repeat.
+    // Fetch per client + one unfiltered pass, all in parallel batches
+    // Each returns 100 orders. Per-client gives different subsets.
     const seen=new Set();
     const allOrders=[];
 
-    // Try SortOldestFirst first
-    let usedSortOldest = false;
-    try {
-      let windowStart=dateFrom;
-      let keepGoing=true;
-      let iterations=0;
+    const fetchTargets=[null,...clientIds]; // null = no client filter
 
-      while(keepGoing && iterations<100){
-        iterations++;
-        const r=await MS.get('/Order/List',{
-          params:{ DateFrom:windowStart, ToDate:dateTo, pageSize:100, SortOldestFirst:true }
-        });
-        const page=Array.isArray(r.data)?r.data:[];
-        let newCount=0;
-        let latestDate=windowStart;
+    for(let i=0;i<fetchTargets.length;i+=10){
+      const batch=fetchTargets.slice(i,i+10);
+      const results=await Promise.all(batch.map(async cid=>{
+        try{
+          const params={ DateFrom:dateFrom, DateTo:dateTo, pageSize:100 };
+          if(cid!==null) params.ClientId=cid;
+          const r=await MS.get('/Order/List',{params});
+          return Array.isArray(r.data)?r.data:[];
+        }catch{return[];}
+      }));
 
+      for(const page of results){
         for(const o of page){
+          // Strict client-side date filter — Mintsoft ignores DateFrom/DateTo
+          const orderMs = new Date(o.OrderDate||0).getTime();
+          if(orderMs < startMs || orderMs > endMs) continue;
+
           const id=String(o.ID||'');
-          // Skip orders outside our date range
-          if(o.OrderDate && o.OrderDate > dateTo) continue;
-          if(o.OrderDate && o.OrderDate < dateFrom) { keepGoing=false; break; }
           if(id&&!seen.has(id)){
             seen.add(id);
             allOrders.push(o);
-            newCount++;
-            if(o.OrderDate&&o.OrderDate>latestDate) latestDate=o.OrderDate;
           }
         }
-
-        if(page.length<100||newCount===0||latestDate===windowStart){
-          keepGoing=false;
-        } else if(new Date(latestDate) >= new Date(dateTo)){
-          keepGoing=false;
-        } else {
-          windowStart=new Date(new Date(latestDate).getTime()+1).toISOString();
-        }
-        if(allOrders.length>=10000) keepGoing=false;
       }
-      usedSortOldest = allOrders.length > 100;
-    } catch(e) {
-      seen.clear();
-      allOrders.length=0;
-    }
 
-    // Strategy 2: If SortOldestFirst didn't get more than 100, fall back to per-client fetch
-    if(!usedSortOldest) {
-      seen.clear();
-      allOrders.length=0;
-
-      // Fetch all client IDs
-      let clientIds=[];
-      try{
-        const cr=await MS.get('/Client');
-        clientIds=(Array.isArray(cr.data)?cr.data:[]).map(c=>c.ID||c.Id).filter(Boolean);
-      }catch{}
-
-      // Add null (no client filter) to catch orders not assigned to a client
-      const fetchTargets=[null,...clientIds];
-
-      // Fetch 10 clients at a time in parallel
-      for(let i=0;i<fetchTargets.length;i+=10){
-        const batch=fetchTargets.slice(i,i+10);
-        const results=await Promise.all(batch.map(async cid=>{
-          try{
-            const params={DateFrom:dateFrom,DateTo:dateTo,pageSize:100};
-            if(cid!==null) params.ClientId=cid;
-            const r=await MS.get('/Order/List',{params});
-            return Array.isArray(r.data)?r.data:[];
-          }catch{return[];}
-        }));
-        for(const page of results){
-          for(const o of page){
-            const id=String(o.ID||'');
-            if(id&&!seen.has(id)){seen.add(id);allOrders.push(o);}
-          }
-        }
-        if(allOrders.length>=10000) break;
-      }
+      if(allOrders.length>=10000) break;
     }
 
     // Normalise
     const orders=allOrders.map(o=>{
       const clientId=String(o.ClientId||'');
       return{
-        id:       String(o.ID||''),
-        ref:      o.OrderNumber||o.ExternalOrderReference||`ORD-${o.ID}`,
-        recipient:[o.FirstName,o.LastName].filter(Boolean).join(' ')||o.CompanyName||'Unknown',
-        created:  o.OrderDate||null,
-        despatched:o.DespatchDate||null,
-        carrier:  detectCarrier(o.CourierServiceName||''),
-        tracking: o.TrackingNumber||null,
+        id:         String(o.ID||''),
+        ref:        o.OrderNumber||o.ExternalOrderReference||`ORD-${o.ID}`,
+        recipient: [o.FirstName,o.LastName].filter(Boolean).join(' ')||o.CompanyName||'Unknown',
+        created:    o.OrderDate||null,
+        despatched: o.DespatchDate||null,
+        carrier:    detectCarrier(o.CourierServiceName||''),
+        tracking:   o.TrackingNumber||null,
         trackingUrl:o.TrackingURL||null,
-        status:   deriveStatus(o),
-        rawCarrier:o.CourierServiceName||'',
+        status:     deriveStatus(o),
+        rawCarrier: o.CourierServiceName||'',
         clientId,
-        clientName:clientMap[clientId]||o.CLIENT_CODE||`Client ${clientId}`,
+        clientName: clientMap[clientId]||o.CLIENT_CODE||`Client ${clientId}`,
       };
-    });
+    }).sort((a,b)=>new Date(b.created)-new Date(a.created)); // newest first
 
-    // Client list for dropdown
+    // Client dropdown
     const clients=[...new Map(
       orders.filter(o=>o.clientId).map(o=>[o.clientId,{id:o.clientId,name:o.clientName}])
     ).values()].sort((a,b)=>a.name.localeCompare(b.name));
@@ -150,13 +112,13 @@ module.exports = async (req, res) => {
     res.json({
       success:true,
       count:orders.length,
-      page_count:Math.ceil(allOrders.length/100),
+      clients_fetched:fetchTargets.length,
       date_range:{from:dateFrom,to:dateTo},
       orders,
       clients
     });
 
   }catch(err){
-    res.status(502).json({success:false,error:err.message,detail:String(err.response?.data||'').slice(0,300)});
+    res.status(502).json({success:false,error:err.message});
   }
 };
