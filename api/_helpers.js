@@ -1,118 +1,106 @@
 const axios = require('axios');
 
 // ─── Mintsoft ────────────────────────────────────────────────────────────────
-// Auth: ms-apikey header (UUID key from /api/Auth endpoint)
-// The key is static (24hr expiry by default, can be made permanent in Mintsoft settings)
+// Auth: Ms-Apikey header. Base: https://api.mintsoft.co.uk/api
 function mintsoftClient() {
   return axios.create({
-    baseURL: 'https://api.mintsoft.co.uk',
+    baseURL: 'https://api.mintsoft.co.uk/api',
     headers: {
-      'ms-apikey':     process.env.MINTSOFT_API_KEY,
+      'Ms-Apikey':     process.env.MINTSOFT_API_KEY,
       'Accept':        'application/json',
       'Content-Type':  'application/json',
     },
-    timeout: 15000,
+    timeout: 20000,
   });
 }
 
 async function fetchMintsoftOrders(dateFrom, dateTo) {
   const client = mintsoftClient();
   const PAGE_SIZE = 100;
-
-  // Step 1: fetch page 1 to find working endpoint and total count
-  let workingPath = null;
-  let firstData = null;
-  for (const path of ['/api/Order/List', '/api/Order']) {
-    try {
-      const r = await client.get(path, {
-        params: { DateFrom: dateFrom, DateTo: dateTo, pageSize: PAGE_SIZE, page: 1 },
-      });
-      firstData = r.data;
-      workingPath = path;
-      break;
-    } catch (err) {
-      if (![404, 405].includes(err.response?.status)) throw err;
-    }
-  }
-  if (!firstData) throw new Error('No working Mintsoft endpoint found');
-
-  const firstPage = Array.isArray(firstData?.Orders || firstData?.Result || firstData?.Data || firstData)
-    ? (firstData?.Orders || firstData?.Result || firstData?.Data || firstData)
-    : [];
-
-  // If first page is not full, we have everything already
-  if (firstPage.length < PAGE_SIZE) return firstPage;
-
-  // Step 2: fetch remaining pages in parallel (up to 15 more = 1600 orders total)
-  const MAX_EXTRA_PAGES = 15;
-  const pagePromises = [];
-  for (let p = 2; p <= MAX_EXTRA_PAGES + 1; p++) {
-    pagePromises.push(
-      client.get(workingPath, {
-        params: { DateFrom: dateFrom, DateTo: dateTo, pageSize: PAGE_SIZE, page: p },
-      }).then(r => {
-        const raw = r.data?.Orders || r.data?.Result || r.data?.Data || r.data;
-        return Array.isArray(raw) ? raw : [];
-      }).catch(() => [])
-    );
-  }
-  const extraPages = await Promise.all(pagePromises);
-
-  // Combine and deduplicate
-  const seen = new Set();
   const allOrders = [];
-  for (const o of firstPage) {
-    const id = String(o.Id || o.OrderId || o.OrderNumber || '');
-    if (id && !seen.has(id)) { seen.add(id); allOrders.push(o); }
-    else if (!id) allOrders.push(o);
-  }
-  for (const page of extraPages) {
-    if (!page.length) break; // empty page = no more data
-    let hasNew = false;
-    for (const o of page) {
-      const id = String(o.Id || o.OrderId || o.OrderNumber || '');
-      if (!seen.has(id)) { seen.add(id); allOrders.push(o); hasNew = true; }
+  const seen = new Set();
+
+  // Use POST /Order/Search with pagination — the correct Mintsoft endpoint
+  // Falls back to GET /Order/List if search fails
+  let useSearch = true;
+
+  for (let page = 1; page <= 20; page++) {
+    let pageOrders = [];
+
+    if (useSearch) {
+      try {
+        const r = await client.post('/Order/Search', {
+          OrderDateFrom: dateFrom,
+          OrderDateTo:   dateTo,
+          PageSize:      PAGE_SIZE,
+          PageNumber:    page,
+        });
+        const raw = r.data?.Orders || r.data?.Result || r.data?.Data || r.data;
+        pageOrders = Array.isArray(raw) ? raw : [];
+      } catch (err) {
+        // Search failed — fall back to GET
+        useSearch = false;
+      }
     }
-    if (!hasNew || page.length < PAGE_SIZE) break;
+
+    if (!useSearch) {
+      try {
+        const r = await client.get('/Order/List', {
+          params: {
+            DateFrom: dateFrom,
+            DateTo:   dateTo,
+            pageSize: PAGE_SIZE,
+            page,
+          },
+        });
+        const raw = r.data?.Orders || r.data?.Result || r.data?.Data || r.data;
+        pageOrders = Array.isArray(raw) ? raw : [];
+      } catch { break; }
+    }
+
+    let newCount = 0;
+    for (const o of pageOrders) {
+      const id = String(o.ID || o.Id || o.OrderId || o.OrderNumber || '');
+      if (!seen.has(id)) {
+        seen.add(id);
+        allOrders.push(o);
+        newCount++;
+      }
+    }
+
+    // Stop: last page, no new orders, or cap reached
+    if (pageOrders.length < PAGE_SIZE || newCount === 0 || allOrders.length >= 2000) break;
   }
 
   return allOrders;
 }
 
-// ─── Royal Mail: no OAuth needed ─────────────────────────────────────────────
-// RM Tracking API v2 authenticates via X-IBM-Client-Id and X-IBM-Client-Secret
-// headers directly on each request — no token step required.
-async function getRmToken() {
-  return null; // not used — kept for health check compatibility
-}
+// ─── Royal Mail ───────────────────────────────────────────────────────────────
+async function getRmToken() { return null; }
 
-// ─── Carrier helpers ─────────────────────────────────────────────────────────
+// ─── Carrier helpers ──────────────────────────────────────────────────────────
 function detectCarrier(name = '') {
   const n = name.toLowerCase();
-  if (n.includes('dpd'))                                                        return 'DPD Local';
+  if (n.includes('dpd')) return 'DPD Local';
   if (n.includes('royal mail') || n.includes('royalmail') || n.startsWith('rm ')) return 'Royal Mail';
   return name || 'Other';
 }
 
 function deriveMintoftStatus(o) {
-  // Use Mintsoft order status codes where available
-  const s = (o.StatusName || o.Status || o.OrderStatus || '').toLowerCase();
+  const s = (o.OrderStatus || o.StatusName || o.Status || '').toLowerCase();
   if (s.includes('despatch') || s.includes('dispatch') || s.includes('shipped') || s.includes('sent')) return 'In transit';
   if (s.includes('deliver')) return 'Delivered';
-  if (s.includes('cancel')) return 'Failed';
-  if (s.includes('return')) return 'Failed';
-  // Fall back to dates
+  if (s.includes('cancel') || s.includes('return')) return 'Failed';
   if (o.DespatchDate || o.DespatchedDate || o.ShippedDate || o.DateDespatched || o.DateShipped) return 'In transit';
-  if (o.RequiredDespatchDate || o.AtNewDate) return 'Processing';
-  return 'Pending';
+  return 'Processing';
 }
 
 function normaliseOrder(o) {
   return {
-    id:         String(o.Id || o.OrderId || ''),
-    ref:        o.ClientOrderReference || o.OrderNumber || o.ExternalOrderReference || o.OrderReference || `ORD-${o.Id}`,
-    recipient: [o.FirstName, o.LastName].filter(Boolean).join(' ') || o.CompanyName || o.DeliveryName || o.Name || 'Unknown',
-    created:    o.CreatedDate    || o.OrderDate     || o.DateCreated    || null,
+    id:         String(o.ID || o.Id || o.OrderId || ''),
+    ref:        o.ClientOrderReference || o.OrderNumber || o.ExternalOrderReference || o.OrderReference || `ORD-${o.ID || o.Id}`,
+    recipient: [o.FirstName, o.LastName].filter(Boolean).join(' ') || o.CustomerName || o.CompanyName || o.DeliveryName || 'Unknown',
+    created:    o.OrderDate  || o.CreatedDate  || o.DateCreated  || null,
     despatched: o.DespatchDate || o.DespatchedDate || o.ShippedDate || o.DateDespatched || o.DateShipped || null,
     carrier:    detectCarrier(o.CourierName || o.ServiceName || o.ShippingMethod || o.Courier || ''),
     tracking:   o.TrackingNumber || o.CourierConsignmentNumber || o.ConsignmentNumber || o.TrackingRef || null,
@@ -136,7 +124,7 @@ async function enrichOrders(orders) {
 
   return orders.map(o => ({
     ...o,
-    status: statusMap[o.tracking] ?? (o.despatched ? 'In transit' : 'Processing'),
+    status: statusMap[o.tracking] ?? o.status,
   }));
 }
 
@@ -144,7 +132,7 @@ async function fetchDpdStatuses(orders) {
   if (!orders.length) return {};
   const map = {};
   const dpd = axios.create({
-    baseURL: 'https://api.dpdlocal.co.uk',
+    baseURL: 'https://myadmin.dpdlocal.co.uk/esgServer',
     headers: { Authorization: `Bearer ${process.env.DPD_API_KEY}`, Accept: 'application/json' },
     timeout: 8000,
   });
@@ -165,8 +153,6 @@ async function fetchDpdStatuses(orders) {
 async function fetchRmStatuses(orders) {
   if (!orders.length) return {};
   const map = {};
-  // Royal Mail Tracking API v2: authenticate with X-IBM-Client-Id + X-IBM-Client-Secret headers
-  // No OAuth2 token step — credentials go directly on each request
   await Promise.all(orders.map(async o => {
     try {
       const r = await axios.get(`https://api.royalmail.net/mailpieces/v2/${o.tracking}/events`, {
