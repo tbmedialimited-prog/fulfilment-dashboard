@@ -19,9 +19,11 @@ function detectCarrier(n=''){
 }
 
 function deriveStatus(o){
+  const sid = o.OrderStatusId || 0;
+  // Mintsoft status IDs: 1=New, 2=Printed, 3=Picked, 4=Packed, 5=Despatched, 6+=post-despatch
+  if(sid >= 5) return 'In transit';
   if(o.DespatchDate) return 'In transit';
-  const sid=o.OrderStatusId||0;
-  if(sid>=5) return 'In transit';
+  if(sid === 0) return 'Processing';
   return 'Processing';
 }
 
@@ -29,10 +31,20 @@ module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin','*');
   if(req.method==='OPTIONS') return res.status(200).end();
 
-  const dateFrom = req.query.from || new Date(Date.now()-7*86400000).toISOString();
-  const dateTo   = req.query.to   || new Date().toISOString();
-  const startMs  = new Date(dateFrom).getTime();
-  const endMs    = new Date(dateTo).getTime();
+  // The frontend sends correct UTC boundaries based on UK timezone
+  // We just use them directly
+  const dateFrom = req.query.from || (() => {
+    // Default: UK today midnight UTC
+    const now = new Date();
+    const ukNow = new Date(now.toLocaleString('en-US', { timeZone: 'Europe/London' }));
+    const utcNow = new Date(now.toLocaleString('en-US', { timeZone: 'UTC' }));
+    const offsetMs = ukNow - utcNow;
+    const ukMidnight = new Date(ukNow.getFullYear(), ukNow.getMonth(), ukNow.getDate());
+    return new Date(ukMidnight.getTime() - offsetMs).toISOString();
+  })();
+  const dateTo = req.query.to || new Date().toISOString();
+  const startMs = new Date(dateFrom).getTime();
+  const endMs   = new Date(dateTo).getTime();
 
   try {
     // Fetch client list
@@ -70,7 +82,8 @@ module.exports = async (req, res) => {
 
       for(const page of results){
         for(const o of page){
-          // Strict client-side date filter — Mintsoft ignores DateFrom/DateTo
+          // Strict client-side date filter using UK timezone
+          // Mintsoft stores UTC, we compare in UTC milliseconds mapped to UK day boundaries
           const orderMs = new Date(o.OrderDate||0).getTime();
           if(orderMs < startMs || orderMs > endMs) continue;
 

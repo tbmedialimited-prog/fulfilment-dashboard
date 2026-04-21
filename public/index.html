@@ -615,19 +615,56 @@ async function loadOrders() {
 // ── Date range ─────────────────────────────────────────────────────────────
 function getDateRange() {
   const now = new Date();
+
+  // Get UK midnight (UTC equivalent) for a day offset from today
+  // Uses Intl to find the correct UTC timestamp for 00:00 Europe/London
+  function ukMidnight(dayOffset) {
+    const d = new Date();
+    d.setDate(d.getDate() + (dayOffset || 0));
+    // Format the date in UK timezone to get year/month/day
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/London',
+      year: 'numeric', month: '2-digit', day: '2-digit'
+    }).formatToParts(d);
+    const y = parts.find(p=>p.type==='year').value;
+    const m = parts.find(p=>p.type==='month').value;
+    const dy = parts.find(p=>p.type==='day').value;
+    // Create a date representing midnight UK time by using the timezone formatter
+    // This gives us the exact UTC ms for 00:00:00 Europe/London on that date
+    return new Date(`${y}-${m}-${dy}T00:00:00+01:00`).toISOString(); // works for BST; see note
+    // Better: use timezone-aware construction
+  }
+
+  // More reliable: get UTC offset for Europe/London right now
+  function ukMidnightUTC(dayOffset) {
+    const d = new Date();
+    d.setDate(d.getDate() + (dayOffset || 0));
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'Europe/London',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+    }).formatToParts(d);
+    const y  = parts.find(p=>p.type==='year').value;
+    const mo = parts.find(p=>p.type==='month').value;
+    const dy = parts.find(p=>p.type==='day').value;
+    // Get the UTC offset for Europe/London at this moment
+    const ukNow  = new Date(d.toLocaleString('en-US', { timeZone: 'Europe/London' }));
+    const utcNow = new Date(d.toLocaleString('en-US', { timeZone: 'UTC' }));
+    const offsetMs = ukNow - utcNow; // e.g. 3600000 for BST
+    // Midnight UK = midnight UTC minus offset
+    const midnight = new Date(`${y}-${mo}-${dy}T00:00:00Z`);
+    midnight.setTime(midnight.getTime() - offsetMs);
+    return midnight.toISOString();
+  }
+
   if (currentRange === 'today') {
-    // Use local midnight so BST/GMT is handled correctly
-    const localMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
-    const localEndOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
-    return { from: localMidnight.toISOString(), to: localEndOfDay.toISOString() };
+    return { from: ukMidnightUTC(0), to: ukMidnightUTC(1) };
   }
   if (currentRange === '7days') {
-    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6, 0, 0, 0);
-    return { from: start.toISOString(), to: now.toISOString() };
+    return { from: ukMidnightUTC(-6), to: now.toISOString() };
   }
   if (currentRange === '30days') {
-    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29, 0, 0, 0);
-    return { from: start.toISOString(), to: now.toISOString() };
+    return { from: ukMidnightUTC(-29), to: now.toISOString() };
   }
   // custom
   const f = document.getElementById('dateFrom').value;
