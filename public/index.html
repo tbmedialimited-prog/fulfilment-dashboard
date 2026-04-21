@@ -616,15 +616,18 @@ async function loadOrders() {
 function getDateRange() {
   const now = new Date();
   if (currentRange === 'today') {
-    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
-    const end   = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59).toISOString();
-    return { from: start, to: end };
+    // Use local midnight so BST/GMT is handled correctly
+    const localMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0);
+    const localEndOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59);
+    return { from: localMidnight.toISOString(), to: localEndOfDay.toISOString() };
   }
   if (currentRange === '7days') {
-    return { from: new Date(now - 6*86400000).toISOString(), to: now.toISOString() };
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6, 0, 0, 0);
+    return { from: start.toISOString(), to: now.toISOString() };
   }
   if (currentRange === '30days') {
-    return { from: new Date(now - 29*86400000).toISOString(), to: now.toISOString() };
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29, 0, 0, 0);
+    return { from: start.toISOString(), to: now.toISOString() };
   }
   // custom
   const f = document.getElementById('dateFrom').value;
