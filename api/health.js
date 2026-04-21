@@ -1,5 +1,5 @@
 const axios = require('axios');
-const { mintsoftClient, getRmToken } = require('./_helpers');
+const { mintsoftClient } = require('./_helpers');
 
 module.exports = async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -17,9 +17,20 @@ module.exports = async (req, res) => {
     }).then(() => { checks.dpdLocal = true; })
       .catch(e => { if (e.response?.status !== 401) checks.dpdLocal = true; }),
 
-    getRmToken()
-      .then(() => { checks.royalMail = true; })
-      .catch(() => {}),
+    // RM: test with a dummy tracking number — 404 means auth worked, 401 means bad creds
+    axios.get('https://api.royalmail.net/mailpieces/v2/TEST123456GB/events', {
+      headers: {
+        'X-IBM-Client-Id':     process.env.RM_API_KEY,
+        'X-IBM-Client-Secret': process.env.RM_API_SECRET,
+        'X-Accept-RMG-Terms':  'yes',
+        'Accept':              'application/json',
+      },
+      timeout: 6000,
+    }).then(() => { checks.royalMail = true; })
+      .catch(e => {
+        // 404 = tracking number not found but auth OK, 400 = bad request but auth OK
+        if ([404, 400].includes(e.response?.status)) checks.royalMail = true;
+      }),
   ]);
 
   res.json({ success: true, connections: checks });

@@ -37,42 +37,11 @@ async function fetchMintsoftOrders(dateFrom, dateTo) {
   throw lastErr;
 }
 
-// ─── Royal Mail OAuth2 token ─────────────────────────────────────────────────
-let _rmToken  = null;
-let _rmExpiry = null;
-
+// ─── Royal Mail: no OAuth needed ─────────────────────────────────────────────
+// RM Tracking API v2 authenticates via X-IBM-Client-Id and X-IBM-Client-Secret
+// headers directly on each request — no token step required.
 async function getRmToken() {
-  if (_rmToken && _rmExpiry && Date.now() < _rmExpiry) return _rmToken;
-
-  const creds = Buffer.from(
-    `${process.env.RM_CLIENT_ID}:${process.env.RM_CLIENT_SECRET}`
-  ).toString('base64');
-
-  // Try all known Royal Mail token URLs
-  const tokenUrls = [
-    'https://api.royalmail.net/oauth2/token',
-    'https://api.royalmail.net/v2/oauth2/token',
-    'https://api.royalmail.net/mailpieces/v2/oauth2/token',
-  ];
-
-  let lastErr;
-  for (const url of tokenUrls) {
-    try {
-      const r = await axios.post(url, 'grant_type=client_credentials', {
-        headers: {
-          'Authorization': `Basic ${creds}`,
-          'Content-Type':  'application/x-www-form-urlencoded',
-        },
-        timeout: 10000,
-      });
-      _rmToken  = r.data.access_token;
-      _rmExpiry = Date.now() + (r.data.expires_in - 60) * 1000;
-      return _rmToken;
-    } catch (err) {
-      lastErr = err;
-    }
-  }
-  throw lastErr;
+  return null; // not used — kept for health check compatibility
 }
 
 // ─── Carrier helpers ─────────────────────────────────────────────────────────
@@ -141,28 +110,26 @@ async function fetchDpdStatuses(orders) {
 async function fetchRmStatuses(orders) {
   if (!orders.length) return {};
   const map = {};
-  try {
-    const token = await getRmToken();
-    await Promise.all(orders.map(async o => {
-      try {
-        const r = await axios.get(`https://api.royalmail.net/mailpieces/v2/${o.tracking}/events`, {
-          headers: {
-            'Authorization':       `Bearer ${token}`,
-            'X-IBM-Client-Id':     process.env.RM_API_KEY,
-            'X-IBM-Client-Secret': process.env.RM_API_SECRET,
-            'X-Accept-RMG-Terms':  'yes',
-            'Accept':              'application/json',
-          },
-          timeout: 8000,
-        });
-        const s = (r.data?.mailPieces?.[0]?.summary?.status || '').toUpperCase();
-        if      (s.includes('DELIVERED'))                           map[o.tracking] = 'Delivered';
-        else if (s.includes('FAILED') || s.includes('RETURN'))     map[o.tracking] = 'Failed';
-        else if (s.includes('TRANSIT') || s.includes('DESPATCHED')) map[o.tracking] = 'In transit';
-        else                                                         map[o.tracking] = 'Processing';
-      } catch { map[o.tracking] = 'In transit'; }
-    }));
-  } catch {}
+  // Royal Mail Tracking API v2: authenticate with X-IBM-Client-Id + X-IBM-Client-Secret headers
+  // No OAuth2 token step — credentials go directly on each request
+  await Promise.all(orders.map(async o => {
+    try {
+      const r = await axios.get(`https://api.royalmail.net/mailpieces/v2/${o.tracking}/events`, {
+        headers: {
+          'X-IBM-Client-Id':     process.env.RM_API_KEY,
+          'X-IBM-Client-Secret': process.env.RM_API_SECRET,
+          'X-Accept-RMG-Terms':  'yes',
+          'Accept':              'application/json',
+        },
+        timeout: 8000,
+      });
+      const s = (r.data?.mailPieces?.[0]?.summary?.status || '').toUpperCase();
+      if      (s.includes('DELIVERED'))                            map[o.tracking] = 'Delivered';
+      else if (s.includes('FAILED') || s.includes('RETURN'))      map[o.tracking] = 'Failed';
+      else if (s.includes('TRANSIT') || s.includes('DESPATCHED')) map[o.tracking] = 'In transit';
+      else                                                          map[o.tracking] = 'Processing';
+    } catch { map[o.tracking] = 'In transit'; }
+  }));
   return map;
 }
 
