@@ -61,6 +61,9 @@ module.exports = async (req, res) => {
 
         for(const o of page){
           const id=String(o.ID||'');
+          // Skip orders outside our date range
+          if(o.OrderDate && o.OrderDate > dateTo) continue;
+          if(o.OrderDate && o.OrderDate < dateFrom) { keepGoing=false; break; }
           if(id&&!seen.has(id)){
             seen.add(id);
             allOrders.push(o);
@@ -70,6 +73,8 @@ module.exports = async (req, res) => {
         }
 
         if(page.length<100||newCount===0||latestDate===windowStart){
+          keepGoing=false;
+        } else if(new Date(latestDate) >= new Date(dateTo)){
           keepGoing=false;
         } else {
           windowStart=new Date(new Date(latestDate).getTime()+1).toISOString();
