@@ -10,49 +10,49 @@ module.exports = async (req, res) => {
   const now = new Date();
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
-  // Prove whether 100 is a true cap or just today's order count
+  // Test all possible pagination workarounds
   try {
-    // Fetch last 30 days - if there are genuinely >100 orders we should see cap behaviour
-    const monthAgo = new Date(now - 30*86400000);
+    const weekAgo = new Date(now - 7*86400000);
 
-    // Test 1: Last 30 days default
-    const r1 = await client.get('/Order/List', { params: { DateFrom: monthAgo.toISOString(), DateTo: now.toISOString(), pageSize: 100 } });
-    const p1 = Array.isArray(r1.data) ? r1.data : [];
-    const ids1 = p1.map(o=>o.ID);
-    results.last_30_days = {
-      count: p1.length,
-      id_range: ids1.length ? `${Math.min(...ids1)}-${Math.max(...ids1)}` : 'empty',
-      oldest_order_date: p1.length ? p1[p1.length-1]?.OrderDate : null,
-      newest_order_date: p1.length ? p1[0]?.OrderDate : null,
+    // 1. ClientId filter - does fetching per client give different orders?
+    const clientR = await client.get('/Client');
+    const allClients = Array.isArray(clientR.data) ? clientR.data : [];
+    const testClients = allClients.slice(0, 5);
+    const clientIds = new Set();
+    for (const c of testClients) {
+      const r = await client.get('/Order/List', { params: { DateFrom: weekAgo.toISOString(), DateTo: now.toISOString(), pageSize: 100, ClientId: c.ID || c.Id } });
+      (Array.isArray(r.data) ? r.data : []).forEach(o => clientIds.add(o.ID));
+    }
+    const defaultR = await client.get('/Order/List', { params: { DateFrom: weekAgo.toISOString(), DateTo: now.toISOString(), pageSize: 100 } });
+    const defaultIds = new Set((Array.isArray(defaultR.data) ? defaultR.data : []).map(o => o.ID));
+    results.client_filter = {
+      unique_across_5_clients: clientIds.size,
+      default_count: defaultIds.size,
+      works: clientIds.size > defaultIds.size
     };
 
-    // Test 2: Try pageSize=500 - if Mintsoft honours it, we get more than 100
-    const r2 = await client.get('/Order/List', { params: { DateFrom: monthAgo.toISOString(), DateTo: now.toISOString(), pageSize: 500 } });
-    const p2 = Array.isArray(r2.data) ? r2.data : [];
-    results.pageSize_500 = { count: p2.length, more_than_100: p2.length > 100 };
+    // 2. WarehouseId filter
+    const whR = await client.get('/Warehouse').catch(() => ({ data: [] }));
+    const warehouses = Array.isArray(whR.data) ? whR.data : [];
+    results.warehouses_found = warehouses.length;
+    if (warehouses.length > 0) {
+      const wR = await client.get('/Order/List', { params: { DateFrom: weekAgo.toISOString(), DateTo: now.toISOString(), pageSize: 100, WarehouseId: warehouses[0].ID } });
+      const wOrders = Array.isArray(wR.data) ? wR.data : [];
+      results.warehouse_filter = { count: wOrders.length, different: wOrders[0]?.ID !== [...defaultIds][0] };
+    }
 
-    // Test 3: Just yesterday - should have ~330 orders if cap is real
-    const yesterday = new Date(now - 86400000);
-    const yesterdayStart = new Date(yesterday.getFullYear(), yesterday.getMonth(), yesterday.getDate());
-    const yesterdayEnd = new Date(yesterdayStart.getTime() + 86400000);
-    const r3 = await client.get('/Order/List', { params: { DateFrom: yesterdayStart.toISOString(), DateTo: yesterdayEnd.toISOString(), pageSize: 100 } });
-    const p3 = Array.isArray(r3.data) ? r3.data : [];
-    const ids3 = p3.map(o=>o.ID);
-    results.yesterday_full_day = {
-      count: p3.length,
-      id_range: ids3.length ? `${Math.min(...ids3)}-${Math.max(...ids3)}` : 'empty',
-      note: p3.length === 100 ? 'CAPPED AT 100 - confirm with pageSize=500 result' : `Only ${p3.length} orders yesterday - may be accurate`
-    };
+    // 3. LastUpdated filter - try fetching orders updated in last hour, then last 2 hours etc
+    const oneHourAgo = new Date(now - 3600000);
+    const lR = await client.get('/Order/List', { params: { LastUpdatedFrom: oneHourAgo.toISOString(), pageSize: 100 } });
+    const lOrders = Array.isArray(lR.data) ? lR.data : [];
+    results.lastUpdated_filter = { count: lOrders.length, sample_id: lOrders[0]?.ID };
 
-    // Test 4: pageSize=500 for yesterday
-    const r4 = await client.get('/Order/List', { params: { DateFrom: yesterdayStart.toISOString(), DateTo: yesterdayEnd.toISOString(), pageSize: 500 } });
-    const p4 = Array.isArray(r4.data) ? r4.data : [];
-    results.yesterday_pageSize_500 = {
-      count: p4.length,
-      proves_cap: p4.length === p3.length ? 'YES - same count with pageSize=500, cap is real' : `NO - got ${p4.length} with 500 vs ${p3.length} with 100`
-    };
+    // 4. AtNewDate filter (the AtNewDate field exists in responses)
+    const anR = await client.get('/Order/List', { params: { AtNewDateFrom: weekAgo.toISOString(), AtNewDateTo: now.toISOString(), pageSize: 100 } });
+    const anOrders = Array.isArray(anR.data) ? anR.data : [];
+    results.atNewDate_filter = { count: anOrders.length, different: anOrders[0]?.ID !== [...defaultIds][0] };
 
-  } catch(e) { results.cap_test = { error: e.message }; }
+  } catch(e) { results.workaround_tests = { error: e.message }; }
 
   // Test 6: Client list
   try {
