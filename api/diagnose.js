@@ -10,53 +10,36 @@ module.exports = async (req, res) => {
   const now = new Date();
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
-  // Test 1: Full day in one request (proves 100 cap)
+  // Test 1: Page 1 (newest 100 orders today)
   try {
-    const r = await client.get('/Order/List', {
+    const r1 = await client.get('/Order/List', {
       params: { DateFrom: todayStart.toISOString(), DateTo: now.toISOString(), pageSize: 100 }
     });
-    results.today_single_request = { count: Array.isArray(r.data) ? r.data.length : 0 };
-  } catch(e) { results.today_single_request = { error: e.message }; }
+    const page1 = Array.isArray(r1.data) ? r1.data : [];
+    const lowestId = page1.reduce((min,o)=>Math.min(min,o.ID||Infinity),Infinity);
+    results.page1 = { count: page1.length, lowest_id: lowestId, highest_id: page1[0]?.ID };
 
-  // Test 2: First 6 hours of today
-  const chunk1End = new Date(todayStart.getTime() + 6*3600000);
-  try {
-    const r = await client.get('/Order/List', {
-      params: { DateFrom: todayStart.toISOString(), DateTo: chunk1End.toISOString(), pageSize: 100 }
-    });
-    results.today_chunk1_0to6am = { count: Array.isArray(r.data) ? r.data.length : 0 };
-  } catch(e) { results.today_chunk1_0to6am = { error: e.message }; }
+    // Test MaxId param - fetch page 2 using lowest ID from page 1
+    if(lowestId < Infinity) {
+      try {
+        const r2 = await client.get('/Order/List', {
+          params: { DateFrom: todayStart.toISOString(), DateTo: now.toISOString(), pageSize: 100, MaxId: lowestId - 1 }
+        });
+        const page2 = Array.isArray(r2.data) ? r2.data : [];
+        results.page2_with_MaxId = { count: page2.length, lowest_id: page2.reduce((m,o)=>Math.min(m,o.ID||Infinity),Infinity), highest_id: page2[0]?.ID };
+        results.MaxId_pagination_works = page2.length > 0 && (page2[0]?.ID||0) < lowestId;
+      } catch(e) { results.page2_with_MaxId = { error: e.message }; }
 
-  // Test 3: Second 6 hours of today
-  try {
-    const r = await client.get('/Order/List', {
-      params: { DateFrom: chunk1End.toISOString(), DateTo: new Date(todayStart.getTime() + 12*3600000).toISOString(), pageSize: 100 }
-    });
-    results.today_chunk2_6to12pm = { count: Array.isArray(r.data) ? r.data.length : 0 };
-  } catch(e) { results.today_chunk2_6to12pm = { error: e.message }; }
-
-  // Test 4: Third 6 hours
-  try {
-    const r = await client.get('/Order/List', {
-      params: { DateFrom: new Date(todayStart.getTime() + 12*3600000).toISOString(), DateTo: new Date(todayStart.getTime() + 18*3600000).toISOString(), pageSize: 100 }
-    });
-    results.today_chunk3_12to6pm = { count: Array.isArray(r.data) ? r.data.length : 0 };
-  } catch(e) { results.today_chunk3_12to6pm = { error: e.message }; }
-
-  // Test 5: Fourth 6 hours
-  try {
-    const r = await client.get('/Order/List', {
-      params: { DateFrom: new Date(todayStart.getTime() + 18*3600000).toISOString(), DateTo: now.toISOString(), pageSize: 100 }
-    });
-    results.today_chunk4_6pmtonow = { count: Array.isArray(r.data) ? r.data.length : 0 };
-  } catch(e) { results.today_chunk4_6pmtonow = { error: e.message }; }
-
-  const chunkTotal = (results.today_chunk1_0to6am?.count||0) +
-                     (results.today_chunk2_6to12pm?.count||0) +
-                     (results.today_chunk3_12to6pm?.count||0) +
-                     (results.today_chunk4_6pmtonow?.count||0);
-  results.today_chunk_total = chunkTotal;
-  results.pagination_working = chunkTotal > (results.today_single_request?.count || 100);
+      // Also test with lowercase maxId
+      try {
+        const r3 = await client.get('/Order/List', {
+          params: { DateFrom: todayStart.toISOString(), DateTo: now.toISOString(), pageSize: 100, maxId: lowestId - 1 }
+        });
+        const page3 = Array.isArray(r3.data) ? r3.data : [];
+        results.page2_with_lowercase_maxId = { count: page3.length, highest_id: page3[0]?.ID };
+      } catch(e) { results.page2_with_lowercase_maxId = { error: e.message }; }
+    }
+  } catch(e) { results.page1 = { error: e.message }; }
 
   // Test 6: Client list
   try {

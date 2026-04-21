@@ -28,16 +28,6 @@ module.exports = async (req, res) => {
   const dateTo   = req.query.to   || new Date().toISOString();
 
   try {
-    // Build 6-hour chunks
-    const CHUNK = 6*60*60*1000;
-    const chunks=[];
-    let cur=new Date(dateFrom);
-    const end=new Date(dateTo);
-    while(cur<end){
-      chunks.push({ from:cur.toISOString(), to:new Date(Math.min(cur.getTime()+CHUNK,end.getTime())).toISOString() });
-      cur=new Date(cur.getTime()+CHUNK);
-    }
-
     // Fetch client map
     let clientMap={};
     try{
@@ -48,23 +38,50 @@ module.exports = async (req, res) => {
       });
     }catch{}
 
-    // Fetch all chunks in batches of 10
+    // Mintsoft caps at 100 results and time-chunk filtering doesn't work reliably.
+    // Solution: fetch page 1, get the lowest ID, then fetch with MaxId = lowestId-1
+    // to get the next 100, repeat until we have all orders in the date range.
     const seen=new Set();
     const allOrders=[];
-    for(let i=0;i<chunks.length;i+=10){
-      const batch=chunks.slice(i,i+10);
-      const results=await Promise.all(batch.map(async({from,to})=>{
-        try{
-          const r=await MS.get('/Order/List',{params:{DateFrom:from,DateTo:to,pageSize:100}});
-          return Array.isArray(r.data)?r.data:[];
-        }catch{return[];}
-      }));
-      for(const page of results){
+    let maxId=null; // null = no filter on first request
+    let keepGoing=true;
+    const startDate=new Date(dateFrom);
+    const endDate=new Date(dateTo);
+
+    while(keepGoing){
+      try{
+        const params={DateFrom:dateFrom,DateTo:dateTo,pageSize:100};
+        if(maxId!==null) params.MaxId=maxId;
+        const r=await MS.get('/Order/List',{params});
+        const page=Array.isArray(r.data)?r.data:[];
+
+        let newCount=0;
+        let lowestId=Infinity;
         for(const o of page){
-          const id=String(o.ID||o.OrderNumber||'');
-          if(id&&!seen.has(id)){seen.add(id);allOrders.push(o);}
+          const id=String(o.ID||'');
+          if(id&&!seen.has(id)){
+            seen.add(id);
+            allOrders.push(o);
+            newCount++;
+            if(o.ID<lowestId) lowestId=o.ID;
+          }
         }
-      }
+
+        // Stop if: fewer than 100 results, no new orders, or oldest order is before our range
+        if(page.length<100||newCount===0||lowestId===Infinity){
+          keepGoing=false;
+        } else {
+          // Check if oldest order in page is within our date range
+          const oldestOrder=page.find(o=>o.ID===lowestId);
+          const oldestDate=oldestOrder?new Date(oldestOrder.OrderDate||0):startDate;
+          if(oldestDate<startDate){
+            keepGoing=false;
+          } else {
+            maxId=lowestId-1; // fetch next batch below this ID
+          }
+        }
+        if(allOrders.length>=5000) keepGoing=false;
+      }catch{keepGoing=false;}
     }
 
     // Normalise
@@ -94,7 +111,7 @@ module.exports = async (req, res) => {
     res.json({
       success:true,
       count:orders.length,
-      chunk_count:chunks.length,
+      page_count:Math.ceil(allOrders.length/100),
       date_range:{from:dateFrom,to:dateTo},
       orders,
       clients
