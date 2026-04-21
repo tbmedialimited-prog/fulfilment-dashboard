@@ -1,13 +1,15 @@
 const axios = require('axios');
 
 // ─── Mintsoft ────────────────────────────────────────────────────────────────
+// Auth: ms-apikey header (UUID key from /api/Auth endpoint)
+// The key is static (24hr expiry by default, can be made permanent in Mintsoft settings)
 function mintsoftClient() {
   return axios.create({
     baseURL: 'https://api.mintsoft.co.uk',
     headers: {
-      'ApiKey': process.env.MINTSOFT_API_KEY,
-      'Accept': 'application/json',
-      'Content-Type': 'application/json',
+      'ms-apikey':     process.env.MINTSOFT_API_KEY,
+      'Accept':        'application/json',
+      'Content-Type':  'application/json',
     },
     timeout: 15000,
   });
@@ -20,6 +22,7 @@ async function fetchMintsoftOrders(dateFrom, dateTo) {
     { path: '/api/Order',      params: { DateFrom: dateFrom, DateTo: dateTo, pageSize: 500 } },
     { path: '/api/Order',      params: { dateFrom, dateTo, pageSize: 500 } },
   ];
+
   let lastErr;
   for (const { path, params } of attempts) {
     try {
@@ -28,35 +31,54 @@ async function fetchMintsoftOrders(dateFrom, dateTo) {
       return Array.isArray(raw) ? raw : [];
     } catch (err) {
       lastErr = err;
-      if (err.response?.status !== 404) throw err;
+      if (![401, 403, 404, 405].includes(err.response?.status)) throw err;
     }
   }
   throw lastErr;
 }
 
-// ─── Royal Mail token ────────────────────────────────────────────────────────
-// Note: serverless functions are stateless so we can't cache across requests,
-// but within a single invocation this prevents double-fetching.
-let _rmToken = null;
+// ─── Royal Mail OAuth2 token ─────────────────────────────────────────────────
+let _rmToken  = null;
 let _rmExpiry = null;
 
 async function getRmToken() {
   if (_rmToken && _rmExpiry && Date.now() < _rmExpiry) return _rmToken;
-  const creds = Buffer.from(`${process.env.RM_CLIENT_ID}:${process.env.RM_CLIENT_SECRET}`).toString('base64');
-  const r = await axios.post(
+
+  const creds = Buffer.from(
+    `${process.env.RM_CLIENT_ID}:${process.env.RM_CLIENT_SECRET}`
+  ).toString('base64');
+
+  // Try all known Royal Mail token URLs
+  const tokenUrls = [
     'https://api.royalmail.net/oauth2/token',
-    'grant_type=client_credentials',
-    { headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 10000 }
-  );
-  _rmToken  = r.data.access_token;
-  _rmExpiry = Date.now() + (r.data.expires_in - 60) * 1000;
-  return _rmToken;
+    'https://api.royalmail.net/v2/oauth2/token',
+    'https://api.royalmail.net/mailpieces/v2/oauth2/token',
+  ];
+
+  let lastErr;
+  for (const url of tokenUrls) {
+    try {
+      const r = await axios.post(url, 'grant_type=client_credentials', {
+        headers: {
+          'Authorization': `Basic ${creds}`,
+          'Content-Type':  'application/x-www-form-urlencoded',
+        },
+        timeout: 10000,
+      });
+      _rmToken  = r.data.access_token;
+      _rmExpiry = Date.now() + (r.data.expires_in - 60) * 1000;
+      return _rmToken;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr;
 }
 
 // ─── Carrier helpers ─────────────────────────────────────────────────────────
 function detectCarrier(name = '') {
   const n = name.toLowerCase();
-  if (n.includes('dpd'))                                               return 'DPD Local';
+  if (n.includes('dpd'))                                                        return 'DPD Local';
   if (n.includes('royal mail') || n.includes('royalmail') || n.startsWith('rm ')) return 'Royal Mail';
   return name || 'Other';
 }
@@ -66,8 +88,8 @@ function normaliseOrder(o) {
     id:         String(o.Id || o.OrderId || ''),
     ref:        o.ClientOrderReference || o.OrderNumber || o.ExternalOrderReference || o.OrderReference || `ORD-${o.Id}`,
     recipient: [o.FirstName, o.LastName].filter(Boolean).join(' ') || o.CompanyName || o.DeliveryName || o.Name || 'Unknown',
-    created:    o.CreatedDate   || o.OrderDate    || o.DateCreated   || null,
-    despatched: o.DespatchedDate || o.ShippedDate || o.DateDespatched || o.DateShipped || null,
+    created:    o.CreatedDate    || o.OrderDate     || o.DateCreated    || null,
+    despatched: o.DespatchedDate || o.ShippedDate   || o.DateDespatched || o.DateShipped || null,
     carrier:    detectCarrier(o.CourierName || o.ServiceName || o.ShippingMethod || o.Courier || ''),
     tracking:   o.TrackingNumber || o.CourierConsignmentNumber || o.ConsignmentNumber || o.TrackingRef || null,
     status:     'Pending',
@@ -124,14 +146,20 @@ async function fetchRmStatuses(orders) {
     await Promise.all(orders.map(async o => {
       try {
         const r = await axios.get(`https://api.royalmail.net/mailpieces/v2/${o.tracking}/events`, {
-          headers: { Authorization: `Bearer ${token}`, 'X-IBM-Client-Id': process.env.RM_API_KEY, 'X-IBM-Client-Secret': process.env.RM_API_SECRET, 'X-Accept-RMG-Terms': 'yes' },
+          headers: {
+            'Authorization':       `Bearer ${token}`,
+            'X-IBM-Client-Id':     process.env.RM_API_KEY,
+            'X-IBM-Client-Secret': process.env.RM_API_SECRET,
+            'X-Accept-RMG-Terms':  'yes',
+            'Accept':              'application/json',
+          },
           timeout: 8000,
         });
         const s = (r.data?.mailPieces?.[0]?.summary?.status || '').toUpperCase();
-        if (s.includes('DELIVERED'))   map[o.tracking] = 'Delivered';
-        else if (s.includes('FAILED') || s.includes('RETURN')) map[o.tracking] = 'Failed';
+        if      (s.includes('DELIVERED'))                           map[o.tracking] = 'Delivered';
+        else if (s.includes('FAILED') || s.includes('RETURN'))     map[o.tracking] = 'Failed';
         else if (s.includes('TRANSIT') || s.includes('DESPATCHED')) map[o.tracking] = 'In transit';
-        else map[o.tracking] = 'Processing';
+        else                                                         map[o.tracking] = 'Processing';
       } catch { map[o.tracking] = 'In transit'; }
     }));
   } catch {}
