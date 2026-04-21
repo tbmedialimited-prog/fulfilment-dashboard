@@ -18,29 +18,33 @@ function mintsoftClient() {
 async function fetchMintsoftOrders(dateFrom, dateTo) {
   const client = mintsoftClient();
 
-  // Mintsoft paginates — fetch all pages until we get fewer results than pageSize
+  // Try large pageSize first — if Mintsoft supports it we get everything in one call.
+  // Mintsoft max pageSize appears to be 100; pagination uses "page" or "pageNumber".
+  // We deduplicate by order ID as a safety net against any repeated pages.
   const PAGE_SIZE = 100;
+  const seen = new Set();
   const allOrders = [];
   let page = 1;
-  let keepGoing = true;
-
-  // Find the working endpoint on first request, then reuse it
   let workingPath = null;
   const candidatePaths = ['/api/Order/List', '/api/Order'];
 
-  while (keepGoing) {
+  for (;;) {
     let data = null;
     let lastErr;
-
     const paths = workingPath ? [workingPath] : candidatePaths;
 
     for (const path of paths) {
       try {
         const r = await client.get(path, {
-          params: { DateFrom: dateFrom, DateTo: dateTo, pageSize: PAGE_SIZE, pageNumber: page },
+          params: {
+            DateFrom: dateFrom,
+            DateTo: dateTo,
+            pageSize: PAGE_SIZE,
+            page,            // Mintsoft uses "page"
+          },
         });
         data = r.data;
-        workingPath = path; // remember which path worked
+        workingPath = path;
         break;
       } catch (err) {
         lastErr = err;
@@ -52,16 +56,23 @@ async function fetchMintsoftOrders(dateFrom, dateTo) {
 
     const raw = data?.Orders || data?.Result || data?.Data || data;
     const pageOrders = Array.isArray(raw) ? raw : [];
-    allOrders.push(...pageOrders);
 
-    // Stop if we got fewer than a full page (last page)
-    if (pageOrders.length < PAGE_SIZE) {
-      keepGoing = false;
-    } else {
-      page++;
-      // Safety cap at 20 pages (2000 orders) to avoid Vercel timeout
-      if (page > 20) keepGoing = false;
+    let newThisPage = 0;
+    for (const o of pageOrders) {
+      const id = String(o.Id || o.OrderId || o.OrderNumber || JSON.stringify(o).slice(0, 40));
+      if (!seen.has(id)) {
+        seen.add(id);
+        allOrders.push(o);
+        newThisPage++;
+      }
     }
+
+    // Stop conditions:
+    // 1. Fewer results than a full page = last page
+    // 2. No new unique orders this page = pagination not supported, already have everything
+    // 3. Safety cap
+    if (pageOrders.length < PAGE_SIZE || newThisPage === 0 || page >= 20) break;
+    page++;
   }
 
   return allOrders;
@@ -82,16 +93,29 @@ function detectCarrier(name = '') {
   return name || 'Other';
 }
 
+function deriveMintoftStatus(o) {
+  // Use Mintsoft order status codes where available
+  const s = (o.StatusName || o.Status || o.OrderStatus || '').toLowerCase();
+  if (s.includes('despatch') || s.includes('dispatch') || s.includes('shipped') || s.includes('sent')) return 'In transit';
+  if (s.includes('deliver')) return 'Delivered';
+  if (s.includes('cancel')) return 'Failed';
+  if (s.includes('return')) return 'Failed';
+  // Fall back to dates
+  if (o.DespatchDate || o.DespatchedDate || o.ShippedDate || o.DateDespatched || o.DateShipped) return 'In transit';
+  if (o.RequiredDespatchDate || o.AtNewDate) return 'Processing';
+  return 'Pending';
+}
+
 function normaliseOrder(o) {
   return {
     id:         String(o.Id || o.OrderId || ''),
     ref:        o.ClientOrderReference || o.OrderNumber || o.ExternalOrderReference || o.OrderReference || `ORD-${o.Id}`,
     recipient: [o.FirstName, o.LastName].filter(Boolean).join(' ') || o.CompanyName || o.DeliveryName || o.Name || 'Unknown',
     created:    o.CreatedDate    || o.OrderDate     || o.DateCreated    || null,
-    despatched: o.DespatchedDate || o.ShippedDate   || o.DateDespatched || o.DateShipped || null,
+    despatched: o.DespatchDate || o.DespatchedDate || o.ShippedDate || o.DateDespatched || o.DateShipped || null,
     carrier:    detectCarrier(o.CourierName || o.ServiceName || o.ShippingMethod || o.Courier || ''),
     tracking:   o.TrackingNumber || o.CourierConsignmentNumber || o.ConsignmentNumber || o.TrackingRef || null,
-    status:     'Pending',
+    status:     deriveMintoftStatus(o),
     rawCarrier: o.CourierName || o.ServiceName || o.Courier || '',
   };
 }

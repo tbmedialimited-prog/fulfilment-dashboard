@@ -11,7 +11,7 @@ module.exports = async (req, res) => {
   for (const path of ['/api/Order/List', '/api/Order', '/api/Client']) {
     try {
       const r = await mintsoftClient().get(path, { params: { pageSize: 1 }, timeout: 8000 });
-      results.mintsoft = { ok: true, endpoint: path, status: r.status, sample: JSON.stringify(r.data).slice(0, 300) };
+      results.mintsoft = { ok: true, endpoint: path, status: r.status, sample: JSON.stringify(r.data).slice(0, 600) };
       break;
     } catch (err) {
       results[`mintsoft${path.replace(/\//g,'_')}`] = {
@@ -50,7 +50,7 @@ module.exports = async (req, res) => {
     results.royalMail = {
       ok: [404, 400].includes(s) || noRoute,
       status: s,
-      body: JSON.stringify(err.response?.data || err.message).slice(0, 300),
+      body: JSON.stringify(err.response?.data || err.message).slice(0, 600),
     };
   }
 
