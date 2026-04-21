@@ -10,36 +10,45 @@ module.exports = async (req, res) => {
   const now = new Date();
   const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
 
-  // Test 1: Page 1 (newest 100 orders today)
+  // Test pagination approaches
   try {
-    const r1 = await client.get('/Order/List', {
-      params: { DateFrom: todayStart.toISOString(), DateTo: now.toISOString(), pageSize: 100 }
-    });
+    // 1. Default - newest 100
+    const r1 = await client.get('/Order/List', { params: { DateFrom: todayStart.toISOString(), DateTo: now.toISOString(), pageSize: 100 } });
     const page1 = Array.isArray(r1.data) ? r1.data : [];
-    const lowestId = page1.reduce((min,o)=>Math.min(min,o.ID||Infinity),Infinity);
-    results.page1 = { count: page1.length, lowest_id: lowestId, highest_id: page1[0]?.ID };
+    const ids1 = page1.map(o=>o.ID);
+    results.page1 = { count: page1.length, id_range: `${Math.min(...ids1)} - ${Math.max(...ids1)}` };
 
-    // Test MaxId param - fetch page 2 using lowest ID from page 1
-    if(lowestId < Infinity) {
-      try {
-        const r2 = await client.get('/Order/List', {
-          params: { DateFrom: todayStart.toISOString(), DateTo: now.toISOString(), pageSize: 100, MaxId: lowestId - 1 }
-        });
-        const page2 = Array.isArray(r2.data) ? r2.data : [];
-        results.page2_with_MaxId = { count: page2.length, lowest_id: page2.reduce((m,o)=>Math.min(m,o.ID||Infinity),Infinity), highest_id: page2[0]?.ID };
-        results.MaxId_pagination_works = page2.length > 0 && (page2[0]?.ID||0) < lowestId;
-      } catch(e) { results.page2_with_MaxId = { error: e.message }; }
+    // 2. Try SortOrder=ASC to get oldest first
+    const r2 = await client.get('/Order/List', { params: { DateFrom: todayStart.toISOString(), DateTo: now.toISOString(), pageSize: 100, SortOrder: 'ASC' } });
+    const page2 = Array.isArray(r2.data) ? r2.data : [];
+    const ids2 = page2.map(o=>o.ID);
+    results.sort_asc = { count: page2.length, id_range: `${Math.min(...ids2)} - ${Math.max(...ids2)}`, different_from_page1: page2[0]?.ID !== page1[0]?.ID };
 
-      // Also test with lowercase maxId
-      try {
-        const r3 = await client.get('/Order/List', {
-          params: { DateFrom: todayStart.toISOString(), DateTo: now.toISOString(), pageSize: 100, maxId: lowestId - 1 }
-        });
-        const page3 = Array.isArray(r3.data) ? r3.data : [];
-        results.page2_with_lowercase_maxId = { count: page3.length, highest_id: page3[0]?.ID };
-      } catch(e) { results.page2_with_lowercase_maxId = { error: e.message }; }
-    }
-  } catch(e) { results.page1 = { error: e.message }; }
+    // 3. Try OrderStatusId filter - get all despatched orders (status 5)
+    const r3 = await client.get('/Order/List', { params: { DateFrom: todayStart.toISOString(), DateTo: now.toISOString(), pageSize: 100, OrderStatusId: 5 } });
+    const page3 = Array.isArray(r3.data) ? r3.data : [];
+    results.status_5_despatched = { count: page3.length };
+
+    // 4. Try OrderStatusId=1 (new orders)
+    const r4 = await client.get('/Order/List', { params: { DateFrom: todayStart.toISOString(), DateTo: now.toISOString(), pageSize: 100, OrderStatusId: 1 } });
+    const page4 = Array.isArray(r4.data) ? r4.data : [];
+    results.status_1_new = { count: page4.length };
+
+    // 5. Try a week with SortOrder ASC  
+    const weekAgo = new Date(now - 7*86400000);
+    const r5 = await client.get('/Order/List', { params: { DateFrom: weekAgo.toISOString(), DateTo: now.toISOString(), pageSize: 100, SortOrder: 'ASC' } });
+    const page5 = Array.isArray(r5.data) ? r5.data : [];
+    const ids5 = page5.map(o=>o.ID);
+    results.week_sort_asc = { count: page5.length, id_range: ids5.length ? `${Math.min(...ids5)} - ${Math.max(...ids5)}` : 'empty' };
+
+    // Are ASC and DESC returning different orders for the week?
+    const r6 = await client.get('/Order/List', { params: { DateFrom: weekAgo.toISOString(), DateTo: now.toISOString(), pageSize: 100 } });
+    const page6 = Array.isArray(r6.data) ? r6.data : [];
+    const ids6 = page6.map(o=>o.ID);
+    results.week_default = { count: page6.length, id_range: ids6.length ? `${Math.min(...ids6)} - ${Math.max(...ids6)}` : 'empty' };
+    results.asc_gives_different_orders = page5[0]?.ID !== page6[0]?.ID;
+
+  } catch(e) { results.pagination_tests = { error: e.message }; }
 
   // Test 6: Client list
   try {
