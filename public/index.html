@@ -416,6 +416,9 @@
           <option value="Failed">Failed</option>
           <option value="Pending">Pending</option>
         </select>
+        <select id="clientFilter" onchange="renderTable()">
+          <option value="">All clients</option>
+        </select>
         <span class="count-badge" id="countBadge">0 orders</span>
       </div>
 
@@ -431,11 +434,12 @@
               <th>Despatch Time</th>
               <th>Carrier</th>
               <th>Tracking</th>
-              <th class="sort" onclick="sortBy('status')">Status <span id="sort-status"></span></th>
+              <th>Client</th>
+              <th class="sort" onclick="sortBy('status')">Status <span id="sort-status"></span></span></th>
             </tr>
           </thead>
           <tbody id="tableBody">
-            <tr><td colspan="8" class="state-cell">
+            <tr><td colspan="9" class="state-cell">
               <div class="spinner"></div>
               <div class="state-title">Loading orders…</div>
             </td></tr>
@@ -585,6 +589,16 @@ async function loadOrders() {
     if (!d.success) throw new Error(d.error + (d.detail ? ' — ' + d.detail : '') || 'Unknown error');
 
     allOrders = d.orders || [];
+    // Populate client dropdown
+    const clientSel = document.getElementById('clientFilter');
+    const currentClient = clientSel.value;
+    clientSel.innerHTML = '<option value="">All clients</option>';
+    (d.clients || []).forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.id; opt.textContent = c.name;
+      if (c.id === currentClient) opt.selected = true;
+      clientSel.appendChild(opt);
+    });
     updateMetrics(allOrders);
     renderTable();
     document.getElementById('lastUpdated').textContent =
@@ -669,6 +683,8 @@ function renderTable() {
   const q      = document.getElementById('searchBox').value.toLowerCase();
   const carrier = document.getElementById('carrierFilter').value;
   const status  = document.getElementById('statusFilter').value;
+  filterClient  = document.getElementById('clientFilter').value;
+  filterClient = document.getElementById('clientFilter').value;
 
   let rows = allOrders.filter(o => {
     if (carrier && o.carrier !== carrier) return false;
@@ -692,7 +708,7 @@ function renderTable() {
 
   const tbody = document.getElementById('tableBody');
   if (!rows.length) {
-    tbody.innerHTML = `<tr><td colspan="8" class="state-cell">
+    tbody.innerHTML = `<tr><td colspan="9" class="state-cell">
       <div class="state-icon">◫</div>
       <div class="state-title">No orders found</div>
       <div class="state-sub">Try adjusting your filters or date range</div>
@@ -760,9 +776,9 @@ function statusBadge(status) {
 function showTableState(type, detail) {
   const tbody = document.getElementById('tableBody');
   if (type === 'loading') {
-    tbody.innerHTML = `<tr><td colspan="8" class="state-cell"><div class="spinner"></div><div class="state-title">Loading orders…</div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9" class="state-cell"><div class="spinner"></div><div class="state-title">Loading orders…</div></td></tr>`;
   } else if (type === 'error') {
-    tbody.innerHTML = `<tr><td colspan="8" class="state-cell">
+    tbody.innerHTML = `<tr><td colspan="9" class="state-cell">
       <div class="state-icon">⚠</div>
       <div class="state-title">Could not load orders</div>
       <div class="state-sub">${escHtml(detail || '')}</div>
