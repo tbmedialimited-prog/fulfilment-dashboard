@@ -38,21 +38,24 @@ module.exports = async (req, res) => {
       });
     }catch{}
 
-    // Mintsoft pagination using SortOldestFirst + sliding DateFrom window.
-    // Fetch oldest 100, advance DateFrom to last order's date, repeat.
+    // Strategy 1: SortOldestFirst sliding window (confirmed by Mintsoft support)
+    // Fetch oldest 100, advance DateFrom past last order, repeat.
     const seen=new Set();
     const allOrders=[];
-    let windowStart=dateFrom;
-    const windowEnd=dateTo;
-    let keepGoing=true;
 
-    while(keepGoing){
-      try{
+    // Try SortOldestFirst first
+    let usedSortOldest = false;
+    try {
+      let windowStart=dateFrom;
+      let keepGoing=true;
+      let iterations=0;
+
+      while(keepGoing && iterations<100){
+        iterations++;
         const r=await MS.get('/Order/List',{
-          params:{ DateFrom:windowStart, ToDate:windowEnd, pageSize:100, SortOldestFirst:true }
+          params:{ DateFrom:windowStart, ToDate:dateTo, pageSize:100, SortOldestFirst:true }
         });
         const page=Array.isArray(r.data)?r.data:[];
-
         let newCount=0;
         let latestDate=windowStart;
 
@@ -62,26 +65,57 @@ module.exports = async (req, res) => {
             seen.add(id);
             allOrders.push(o);
             newCount++;
-            // Track the latest OrderDate in this page to advance the window
-            if(o.OrderDate && o.OrderDate > latestDate) latestDate=o.OrderDate;
+            if(o.OrderDate&&o.OrderDate>latestDate) latestDate=o.OrderDate;
           }
         }
 
-        if(page.length<100||newCount===0){
-          // Last page or no new orders
-          keepGoing=false;
-        } else if(latestDate===windowStart){
-          // Date didn't advance - avoid infinite loop
+        if(page.length<100||newCount===0||latestDate===windowStart){
           keepGoing=false;
         } else {
-          // Advance window to just after the latest order we saw
-          // Add 1ms to avoid re-fetching the boundary order
-          const nextStart=new Date(new Date(latestDate).getTime()+1).toISOString();
-          windowStart=nextStart;
+          windowStart=new Date(new Date(latestDate).getTime()+1).toISOString();
         }
-
         if(allOrders.length>=10000) keepGoing=false;
-      }catch{ keepGoing=false; }
+      }
+      usedSortOldest = allOrders.length > 100;
+    } catch(e) {
+      seen.clear();
+      allOrders.length=0;
+    }
+
+    // Strategy 2: If SortOldestFirst didn't get more than 100, fall back to per-client fetch
+    if(!usedSortOldest) {
+      seen.clear();
+      allOrders.length=0;
+
+      // Fetch all client IDs
+      let clientIds=[];
+      try{
+        const cr=await MS.get('/Client');
+        clientIds=(Array.isArray(cr.data)?cr.data:[]).map(c=>c.ID||c.Id).filter(Boolean);
+      }catch{}
+
+      // Add null (no client filter) to catch orders not assigned to a client
+      const fetchTargets=[null,...clientIds];
+
+      // Fetch 10 clients at a time in parallel
+      for(let i=0;i<fetchTargets.length;i+=10){
+        const batch=fetchTargets.slice(i,i+10);
+        const results=await Promise.all(batch.map(async cid=>{
+          try{
+            const params={DateFrom:dateFrom,DateTo:dateTo,pageSize:100};
+            if(cid!==null) params.ClientId=cid;
+            const r=await MS.get('/Order/List',{params});
+            return Array.isArray(r.data)?r.data:[];
+          }catch{return[];}
+        }));
+        for(const page of results){
+          for(const o of page){
+            const id=String(o.ID||'');
+            if(id&&!seen.has(id)){seen.add(id);allOrders.push(o);}
+          }
+        }
+        if(allOrders.length>=10000) break;
+      }
     }
 
     // Normalise
