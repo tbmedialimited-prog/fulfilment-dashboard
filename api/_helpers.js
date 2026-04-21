@@ -1,24 +1,65 @@
 const axios = require('axios');
 
 // ─── Mintsoft ────────────────────────────────────────────────────────────────
+// Confirmed field names from API: ClientId, OrderStatusId, DespatchDate,
+// TrackingNumber, CourierServiceName, CourierServiceId, OrderNumber, ID
+// Hard cap: 100 orders per request. Fix: 6-hour time chunks.
+
 function mintsoftClient() {
   return axios.create({
     baseURL: 'https://api.mintsoft.co.uk/api',
     headers: {
-      'Ms-Apikey':     process.env.MINTSOFT_API_KEY,
-      'Accept':        'application/json',
-      'Content-Type':  'application/json',
+      'Ms-Apikey':    process.env.MINTSOFT_API_KEY,
+      'Accept':       'application/json',
+      'Content-Type': 'application/json',
     },
     timeout: 20000,
   });
 }
 
+// Mintsoft order status IDs (from GET /api/Order/Statuses)
+// Common: 1=NEW, 2=PRINTED, 3=PICKED, 4=PACKED, 5=DESPATCHED, 6=CANCELLED
+// We map by DespatchDate as the most reliable signal
+function deriveMintoftStatus(o) {
+  const sid = o.OrderStatusId;
+  if (sid === 5 || sid === 6  || (o.DespatchDate && sid > 2)) return 'In transit';
+  if (sid === 7 || sid === 8)  return 'Delivered';
+  if (sid === 9 || sid === 10) return 'Failed';
+  if (o.DespatchDate)          return 'In transit';
+  if (sid <= 2)                return 'Processing';
+  return 'Processing';
+}
+
+function detectCarrier(name = '') {
+  const n = name.toLowerCase();
+  if (n.includes('dpd'))                                                          return 'DPD Local';
+  if (n.includes('royal mail') || n.includes('royalmail') || n.startsWith('rm ')) return 'Royal Mail';
+  return name || 'Other';
+}
+
+function normaliseOrder(o, clientMap = {}) {
+  const clientId = String(o.ClientId || '');
+  return {
+    id:         String(o.ID || ''),
+    ref:        o.OrderNumber || o.ExternalOrderReference || `ORD-${o.ID}`,
+    recipient: [o.FirstName, o.LastName].filter(Boolean).join(' ') || o.CompanyName || 'Unknown',
+    created:    o.OrderDate   || null,
+    despatched: o.DespatchDate || null,
+    carrier:    detectCarrier(o.CourierServiceName || ''),
+    tracking:   o.TrackingNumber || null,
+    trackingUrl: o.TrackingURL || null,
+    status:     deriveMintoftStatus(o),
+    rawCarrier: o.CourierServiceName || '',
+    clientId,
+    clientName: clientMap[clientId] || o.CLIENT_CODE || `Client ${clientId}`,
+    orderStatusId: o.OrderStatusId,
+  };
+}
+
 async function fetchMintsoftOrders(dateFrom, dateTo) {
   const client = mintsoftClient();
+  const CHUNK_MS = 6 * 60 * 60 * 1000; // 6-hour chunks
 
-  // Mintsoft hard-caps at 100 orders per request with no server pagination.
-  // Fix: split into 6-hour chunks (at 330 orders/day each chunk averages ~80).
-  const CHUNK_MS = 6 * 60 * 60 * 1000;
   const chunks = [];
   let cursor = new Date(dateFrom);
   const end = new Date(dateTo);
@@ -30,10 +71,9 @@ async function fetchMintsoftOrders(dateFrom, dateTo) {
     cursor = new Date(cursor.getTime() + CHUNK_MS);
   }
 
-  // Fetch in parallel batches of 10
-  const CONCURRENCY = 10;
   const allOrders = [];
   const seen = new Set();
+  const CONCURRENCY = 10;
 
   for (let i = 0; i < chunks.length; i += CONCURRENCY) {
     const batch = chunks.slice(i, i + CONCURRENCY);
@@ -47,7 +87,7 @@ async function fetchMintsoftOrders(dateFrom, dateTo) {
     }));
     for (const page of results) {
       for (const o of page) {
-        const id = String(o.ID || o.Id || o.OrderId || o.OrderNumber || '');
+        const id = String(o.ID || o.OrderNumber || '');
         if (id && !seen.has(id)) { seen.add(id); allOrders.push(o); }
       }
     }
@@ -56,58 +96,20 @@ async function fetchMintsoftOrders(dateFrom, dateTo) {
   return allOrders;
 }
 
-// Fetch client name lookup table from Mintsoft
 async function fetchMintsoftClients() {
   try {
-    const client = mintsoftClient();
-    const r = await client.get('/Client');
+    const r = await mintsoftClient().get('/Client');
     const raw = Array.isArray(r.data) ? r.data : [];
     const map = {};
     for (const c of raw) {
-      const id = c.ID || c.Id || c.ClientId;
-      if (id) map[String(id)] = c.Name || c.ClientName || c.CompanyName || `Client ${id}`;
+      const id = String(c.ID || c.Id || c.ClientId || '');
+      if (id) map[id] = c.Name || c.ClientName || c.CompanyName || id;
     }
     return map;
   } catch { return {}; }
 }
 
-// ─── Royal Mail ───────────────────────────────────────────────────────────────
-async function getRmToken() { return null; }
-
-// ─── Carrier helpers ──────────────────────────────────────────────────────────
-function detectCarrier(name = '') {
-  const n = name.toLowerCase();
-  if (n.includes('dpd')) return 'DPD Local';
-  if (n.includes('royal mail') || n.includes('royalmail') || n.startsWith('rm ')) return 'Royal Mail';
-  return name || 'Other';
-}
-
-function deriveMintoftStatus(o) {
-  const s = (o.OrderStatus || o.StatusName || o.Status || '').toLowerCase();
-  if (s.includes('despatch') || s.includes('dispatch') || s.includes('shipped') || s.includes('sent')) return 'In transit';
-  if (s.includes('deliver')) return 'Delivered';
-  if (s.includes('cancel') || s.includes('return')) return 'Failed';
-  if (o.DespatchDate || o.DespatchedDate || o.ShippedDate || o.DateDespatched || o.DateShipped) return 'In transit';
-  return 'Processing';
-}
-
-function normaliseOrder(o, clientMap = {}) {
-  const clientId = String(o.ClientId || o.ClientID || o.ClientID || '');
-  return {
-    id:         String(o.ID || o.Id || o.OrderId || ''),
-    ref:        o.ClientOrderReference || o.OrderNumber || o.ExternalOrderReference || o.OrderReference || `ORD-${o.ID || o.Id}`,
-    recipient: [o.FirstName, o.LastName].filter(Boolean).join(' ') || o.CustomerName || o.CompanyName || o.DeliveryName || 'Unknown',
-    created:    o.OrderDate  || o.CreatedDate  || o.DateCreated  || null,
-    despatched: o.DespatchDate || o.DespatchedDate || o.ShippedDate || o.DateDespatched || o.DateShipped || null,
-    carrier:    detectCarrier(o.CourierName || o.ServiceName || o.ShippingMethod || o.Courier || ''),
-    tracking:   o.TrackingNumber || o.CourierConsignmentNumber || o.ConsignmentNumber || o.TrackingRef || null,
-    status:     deriveMintoftStatus(o),
-    rawCarrier: o.CourierName || o.ServiceName || o.Courier || '',
-    clientId,
-    clientName: clientMap[clientId] || o.ClientName || o.CLIENT_CODE || clientId || 'Unknown',
-  };
-}
-
+// ─── Enrich with carrier tracking ────────────────────────────────────────────
 async function enrichOrders(orders) {
   const dpdOrders = orders.filter(o => o.carrier === 'DPD Local' && o.tracking);
   const rmOrders  = orders.filter(o => o.carrier === 'Royal Mail' && o.tracking);
@@ -127,35 +129,55 @@ async function enrichOrders(orders) {
   }));
 }
 
-// ─── DPD GeoPost Meta API ─────────────────────────────────────────────────────
+// ─── DPD Local tracking ──────────────────────────────────────────────────────
+// DPD Local uses username/password login to get a session token, then
+// uses that token to query tracking events per shipment.
+// Credentials: DPD_USERNAME (email), DPD_PASSWORD, DPD_ACCOUNT_NUMBER
+
+let _dpdToken = null;
+let _dpdTokenExpiry = null;
+
+async function getDpdToken() {
+  if (_dpdToken && _dpdTokenExpiry && Date.now() < _dpdTokenExpiry) return _dpdToken;
+  const r = await axios.get('https://api.dpdlocal.co.uk/user/?action=login', {
+    auth: {
+      username: `${process.env.DPD_USERNAME}/${process.env.DPD_ACCOUNT_NUMBER}`,
+      password: process.env.DPD_PASSWORD,
+    },
+    headers: { Accept: 'application/json' },
+    timeout: 8000,
+  });
+  const token = r.data?.data?.token;
+  if (!token) throw new Error('DPD login failed');
+  _dpdToken = token;
+  _dpdTokenExpiry = Date.now() + 55 * 60 * 1000;
+  return token;
+}
+
 async function fetchDpdStatuses(orders) {
   if (!orders.length) return {};
   const map = {};
-  const BATCH = 100;
-  const trackingNos = orders.map(o => o.tracking);
-
-  for (let i = 0; i < trackingNos.length; i += BATCH) {
-    const batch = trackingNos.slice(i, i + BATCH);
-    try {
-      const r = await axios.post(
-        'https://api.dpdgroup.com/tracking/v2/parcels',
-        { language: 'EN', parcelNumbers: batch },
-        {
-          headers: { 'apiKey': process.env.DPD_API_KEY, 'Content-Type': 'application/json', Accept: 'application/json' },
-          timeout: 10000,
-        }
-      );
-      for (const parcel of (Array.isArray(r.data) ? r.data : [])) {
-        if (!parcel.parcelNumber) continue;
-        const events = parcel.parcelEvents || [];
-        if (!events.length) { map[parcel.parcelNumber] = 'In transit'; continue; }
-        const latest = events[0];
-        const family = (latest.statusFamilyLabel || '').toUpperCase();
-        if (family === 'DELIVERED') map[parcel.parcelNumber] = 'Delivered';
-        else if (family.includes('RETURN') || family.includes('EXCEPTION')) map[parcel.parcelNumber] = 'Failed';
-        else map[parcel.parcelNumber] = 'In transit';
-      }
-    } catch { for (const t of batch) map[t] = 'In transit'; }
+  try {
+    const token = await getDpdToken();
+    await Promise.all(orders.map(async o => {
+      try {
+        const r = await axios.get(
+          `https://api.dpdlocal.co.uk/shipping/shipment/${o.tracking}/trackingEvents`,
+          { headers: { Authorization: `Basic ${token}`, Accept: 'application/json' }, timeout: 8000 }
+        );
+        const events = r.data?.data?.shipmentTrackingEvents || [];
+        if (!events.length) { map[o.tracking] = 'In transit'; return; }
+        const latest = events[events.length - 1];
+        const code = (latest.eventCode || '').toUpperCase();
+        const desc = (latest.description || '').toLowerCase();
+        if (code === 'DEL' || desc.includes('delivered')) map[o.tracking] = 'Delivered';
+        else if (code === 'DEX' || desc.includes('failed')) map[o.tracking] = 'Failed';
+        else map[o.tracking] = 'In transit';
+      } catch { map[o.tracking] = 'In transit'; }
+    }));
+  } catch (err) {
+    console.warn('[DPD] auth failed:', err.message);
+    for (const o of orders) map[o.tracking] = 'In transit';
   }
   return map;
 }
@@ -185,4 +207,6 @@ async function fetchRmStatuses(orders) {
   return map;
 }
 
-module.exports = { mintsoftClient, fetchMintsoftOrders, fetchMintsoftClients, getRmToken, detectCarrier, normaliseOrder, enrichOrders };
+async function getRmToken() { return null; }
+
+module.exports = { mintsoftClient, fetchMintsoftOrders, fetchMintsoftClients, getRmToken, normaliseOrder, enrichOrders };

@@ -683,7 +683,6 @@ function renderTable() {
   const q      = document.getElementById('searchBox').value.toLowerCase();
   const carrier = document.getElementById('carrierFilter').value;
   const status  = document.getElementById('statusFilter').value;
-  filterClient  = document.getElementById('clientFilter').value;
   filterClient = document.getElementById('clientFilter').value;
 
   let rows = allOrders.filter(o => {
@@ -733,6 +732,7 @@ function renderTable() {
       <td class="td-duration">${duration}</td>
       <td>${carrier}</td>
       <td style="max-width:130px">${tracking}</td>
+      <td style="font-size:12px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escHtml(o.clientName||'')}">${escHtml(o.clientName||'—')}</td>
       <td>${badge}</td>
     </tr>`;
   }).join('');
