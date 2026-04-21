@@ -29,7 +29,9 @@ module.exports = async (req, res) => {
     }).then(() => { checks.royalMail = true; })
       .catch(e => {
         // 404 = tracking number not found but auth OK, 400 = bad request but auth OK
-        if ([404, 400].includes(e.response?.status)) checks.royalMail = true;
+        const s = e.response?.status;
+        const noRoute = (e.response?.data?.moreInformation || '').includes('No resources match');
+        if ([404, 400].includes(s) || noRoute) checks.royalMail = true;
       }),
   ]);
 
