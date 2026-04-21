@@ -24,7 +24,14 @@ module.exports = async (req, res) => {
       orders.filter(o => o.clientId).map(o => [o.clientId, { id: o.clientId, name: o.clientName }])
     ).values()].sort((a, b) => a.name.localeCompare(b.name));
 
-    res.json({ success: true, count: orders.length, orders, clients });
+    res.json({
+      success: true,
+      count: orders.length,
+      chunk_count: Math.ceil((new Date(dateTo) - new Date(dateFrom)) / (6 * 60 * 60 * 1000)),
+      date_range: { from: dateFrom, to: dateTo },
+      orders,
+      clients
+    });
   } catch (err) {
     const status = err.response?.status || 502;
     const detail = JSON.stringify(err.response?.data || err.message).slice(0, 300);

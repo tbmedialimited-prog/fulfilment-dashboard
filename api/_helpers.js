@@ -139,7 +139,7 @@ let _dpdTokenExpiry = null;
 
 async function getDpdToken() {
   if (_dpdToken && _dpdTokenExpiry && Date.now() < _dpdTokenExpiry) return _dpdToken;
-  const r = await axios.get('https://api.dpdlocal.co.uk/user/?action=login', {
+  const r = await axios.get('https://myadmin.dpdlocal.co.uk/esgServer/user/?action=login', {
     auth: {
       username: `${process.env.DPD_USERNAME}/${process.env.DPD_ACCOUNT_NUMBER}`,
       password: process.env.DPD_PASSWORD,
@@ -162,7 +162,7 @@ async function fetchDpdStatuses(orders) {
     await Promise.all(orders.map(async o => {
       try {
         const r = await axios.get(
-          `https://api.dpdlocal.co.uk/shipping/shipment/${o.tracking}/trackingEvents`,
+          `https://myadmin.dpdlocal.co.uk/esgServer/shipping/shipment/${o.tracking}/trackingEvents`,
           { headers: { Authorization: `Basic ${token}`, Accept: 'application/json' }, timeout: 8000 }
         );
         const events = r.data?.data?.shipmentTrackingEvents || [];

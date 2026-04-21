@@ -66,7 +66,7 @@ module.exports = async (req, res) => {
 
   // Test 7: DPD Local - login then track
   try {
-    const loginR = await axios.get('https://api.dpdlocal.co.uk/user/?action=login', {
+    const loginR = await axios.get('https://myadmin.dpdlocal.co.uk/esgServer/user/?action=login', {
       auth: {
         username: `${process.env.DPD_USERNAME}/${process.env.DPD_ACCOUNT_NUMBER}`,
         password: process.env.DPD_PASSWORD,
@@ -78,7 +78,7 @@ module.exports = async (req, res) => {
     results.dpd_login = { ok: !!token, token: token ? token.slice(0,10)+'...' : null, response: JSON.stringify(loginR.data).slice(0,200) };
 
     if (token) {
-      const trackR = await axios.get('https://api.dpdlocal.co.uk/shipping/shipment/15976968996843/trackingEvents', {
+      const trackR = await axios.get('https://myadmin.dpdlocal.co.uk/esgServer/shipping/shipment/15976968996843/trackingEvents', {
         headers: { Authorization: `Basic ${token}`, Accept: 'application/json' },
         timeout: 8000,
       });
