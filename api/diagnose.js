@@ -57,6 +57,8 @@ module.exports = async (req, res) => {
   // Env vars
   results.env = {
     MINTSOFT_API_KEY: process.env.MINTSOFT_API_KEY ? `set (${process.env.MINTSOFT_API_KEY.slice(0,6)}…)` : '✗ MISSING',
+    DPD_USERNAME:     process.env.DPD_USERNAME     ? 'set' : '✗ MISSING (needed for login)',
+    DPD_PASSWORD:     process.env.DPD_PASSWORD     ? 'set' : '✗ MISSING (needed for login)',
     DPD_API_KEY:      process.env.DPD_API_KEY      ? `set (${process.env.DPD_API_KEY.slice(0,6)}…)`      : '✗ MISSING',
     RM_API_KEY:       process.env.RM_API_KEY        ? `set (${process.env.RM_API_KEY.slice(0,6)}…)`        : '✗ MISSING',
     RM_API_SECRET:    process.env.RM_API_SECRET     ? 'set'                                                  : '✗ MISSING',

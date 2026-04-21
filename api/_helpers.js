@@ -17,62 +17,63 @@ function mintsoftClient() {
 
 async function fetchMintsoftOrders(dateFrom, dateTo) {
   const client = mintsoftClient();
-
-  // Try large pageSize first — if Mintsoft supports it we get everything in one call.
-  // Mintsoft max pageSize appears to be 100; pagination uses "page" or "pageNumber".
-  // We deduplicate by order ID as a safety net against any repeated pages.
   const PAGE_SIZE = 100;
+
+  // Step 1: fetch page 1 to find working endpoint and total count
+  let workingPath = null;
+  let firstData = null;
+  for (const path of ['/api/Order/List', '/api/Order']) {
+    try {
+      const r = await client.get(path, {
+        params: { DateFrom: dateFrom, DateTo: dateTo, pageSize: PAGE_SIZE, page: 1 },
+      });
+      firstData = r.data;
+      workingPath = path;
+      break;
+    } catch (err) {
+      if (![404, 405].includes(err.response?.status)) throw err;
+    }
+  }
+  if (!firstData) throw new Error('No working Mintsoft endpoint found');
+
+  const firstPage = Array.isArray(firstData?.Orders || firstData?.Result || firstData?.Data || firstData)
+    ? (firstData?.Orders || firstData?.Result || firstData?.Data || firstData)
+    : [];
+
+  // If first page is not full, we have everything already
+  if (firstPage.length < PAGE_SIZE) return firstPage;
+
+  // Step 2: fetch remaining pages in parallel (up to 15 more = 1600 orders total)
+  const MAX_EXTRA_PAGES = 15;
+  const pagePromises = [];
+  for (let p = 2; p <= MAX_EXTRA_PAGES + 1; p++) {
+    pagePromises.push(
+      client.get(workingPath, {
+        params: { DateFrom: dateFrom, DateTo: dateTo, pageSize: PAGE_SIZE, page: p },
+      }).then(r => {
+        const raw = r.data?.Orders || r.data?.Result || r.data?.Data || r.data;
+        return Array.isArray(raw) ? raw : [];
+      }).catch(() => [])
+    );
+  }
+  const extraPages = await Promise.all(pagePromises);
+
+  // Combine and deduplicate
   const seen = new Set();
   const allOrders = [];
-  let page = 1;
-  let workingPath = null;
-  const candidatePaths = ['/api/Order/List', '/api/Order'];
-
-  for (;;) {
-    let data = null;
-    let lastErr;
-    const paths = workingPath ? [workingPath] : candidatePaths;
-
-    for (const path of paths) {
-      try {
-        const r = await client.get(path, {
-          params: {
-            DateFrom: dateFrom,
-            DateTo: dateTo,
-            pageSize: PAGE_SIZE,
-            page,            // Mintsoft uses "page"
-          },
-        });
-        data = r.data;
-        workingPath = path;
-        break;
-      } catch (err) {
-        lastErr = err;
-        if (![404, 405].includes(err.response?.status)) throw err;
-      }
+  for (const o of firstPage) {
+    const id = String(o.Id || o.OrderId || o.OrderNumber || '');
+    if (id && !seen.has(id)) { seen.add(id); allOrders.push(o); }
+    else if (!id) allOrders.push(o);
+  }
+  for (const page of extraPages) {
+    if (!page.length) break; // empty page = no more data
+    let hasNew = false;
+    for (const o of page) {
+      const id = String(o.Id || o.OrderId || o.OrderNumber || '');
+      if (!seen.has(id)) { seen.add(id); allOrders.push(o); hasNew = true; }
     }
-
-    if (!data) throw lastErr;
-
-    const raw = data?.Orders || data?.Result || data?.Data || data;
-    const pageOrders = Array.isArray(raw) ? raw : [];
-
-    let newThisPage = 0;
-    for (const o of pageOrders) {
-      const id = String(o.Id || o.OrderId || o.OrderNumber || JSON.stringify(o).slice(0, 40));
-      if (!seen.has(id)) {
-        seen.add(id);
-        allOrders.push(o);
-        newThisPage++;
-      }
-    }
-
-    // Stop conditions:
-    // 1. Fewer results than a full page = last page
-    // 2. No new unique orders this page = pagination not supported, already have everything
-    // 3. Safety cap
-    if (pageOrders.length < PAGE_SIZE || newThisPage === 0 || page >= 20) break;
-    page++;
+    if (!hasNew || page.length < PAGE_SIZE) break;
   }
 
   return allOrders;
