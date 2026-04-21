@@ -10,42 +10,31 @@ module.exports = async (req, res) => {
   const now = new Date().toISOString();
   const week = new Date(Date.now() - 7*86400000).toISOString();
 
-  // Mintsoft POST /Order/Search
+  // Mintsoft — check how many orders come back for today only
   try {
-    const r = await client.post('/Order/Search', { OrderDateFrom: week, OrderDateTo: now, PageSize: 5, PageNumber: 1 });
-    const raw = r.data?.Orders || r.data?.Result || r.data?.Data || r.data;
-    results.mintsoft_search = {
+    const today = new Date();
+    const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate()).toISOString();
+    const r = await client.get('/Order/List', { params: { DateFrom: todayStart, DateTo: now, pageSize: 100 } });
+    const raw = Array.isArray(r.data) ? r.data : [];
+    results.mintsoft = {
       ok: true, status: r.status,
-      top_level_keys: Object.keys(r.data || {}).join(', '),
-      count: Array.isArray(raw) ? raw.length : 'not array',
-      sample: JSON.stringify(raw).slice(0, 400),
+      today_count: raw.length,
+      sample_order: raw[0] ? { keys: Object.keys(raw[0]).join(', '), OrderStatus: raw[0].OrderStatus, DespatchDate: raw[0].DespatchDate, CourierName: raw[0].CourierName, TrackingNumber: raw[0].TrackingNumber } : null,
     };
   } catch (err) {
-    results.mintsoft_search = { ok: false, status: err.response?.status, body: JSON.stringify(err.response?.data || err.message).slice(0,300) };
+    results.mintsoft = { ok: false, status: err.response?.status, body: JSON.stringify(err.response?.data || err.message).slice(0,300) };
   }
 
-  // Mintsoft GET /Order/List fallback
+  // DPD GeoPost Meta API
   try {
-    const r = await client.get('/Order/List', { params: { DateFrom: week, DateTo: now, pageSize: 5 } });
-    const raw = r.data?.Orders || r.data?.Result || r.data?.Data || r.data;
-    results.mintsoft_list = {
-      ok: true, status: r.status,
-      top_level_keys: Object.keys(r.data || {}).join(', '),
-      count: Array.isArray(raw) ? raw.length : 'not array',
-    };
+    const r = await axios.post(
+      'https://api.dpdgroup.com/tracking/v2/parcels',
+      { language: 'EN', parcelNumbers: ['15976968996843'] },
+      { headers: { 'apiKey': process.env.DPD_API_KEY, 'Content-Type': 'application/json', Accept: 'application/json' }, timeout: 10000 }
+    );
+    results.dpd = { ok: true, status: r.status, data: JSON.stringify(r.data).slice(0, 500) };
   } catch (err) {
-    results.mintsoft_list = { ok: false, status: err.response?.status, body: JSON.stringify(err.response?.data || err.message).slice(0,200) };
-  }
-
-  // DPD
-  try {
-    const r = await axios.get('https://myadmin.dpdlocal.co.uk/esgServer/shipping/shipment/15976968996843/trackingEvents', {
-      headers: { Authorization: `Bearer ${process.env.DPD_API_KEY}`, Accept: 'application/json' },
-      timeout: 8000,
-    });
-    results.dpd = { ok: true, status: r.status, data: JSON.stringify(r.data).slice(0,300) };
-  } catch (err) {
-    results.dpd = { ok: false, status: err.response?.status, body: JSON.stringify(err.response?.data || err.message).slice(0,300) };
+    results.dpd = { ok: false, status: err.response?.status, body: JSON.stringify(err.response?.data || err.message).slice(0, 300) };
   }
 
   // Royal Mail
@@ -62,8 +51,6 @@ module.exports = async (req, res) => {
   results.env = {
     MINTSOFT_API_KEY: process.env.MINTSOFT_API_KEY ? `set (${process.env.MINTSOFT_API_KEY.slice(0,6)}…)` : '✗ MISSING',
     DPD_API_KEY:      process.env.DPD_API_KEY      ? `set (${process.env.DPD_API_KEY.slice(0,6)}…)`      : '✗ MISSING',
-    DPD_USERNAME:     process.env.DPD_USERNAME      ? 'set' : '✗ MISSING',
-    DPD_PASSWORD:     process.env.DPD_PASSWORD      ? 'set' : '✗ MISSING',
     RM_API_KEY:       process.env.RM_API_KEY        ? `set (${process.env.RM_API_KEY.slice(0,6)}…)`        : '✗ MISSING',
     RM_API_SECRET:    process.env.RM_API_SECRET     ? 'set' : '✗ MISSING',
   };

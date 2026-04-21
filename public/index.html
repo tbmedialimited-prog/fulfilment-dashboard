@@ -572,7 +572,8 @@ function setConnDot(id, state) {
 // ── Load orders ────────────────────────────────────────────────────────────
 async function loadOrders() {
   const btn = document.getElementById('refreshBtn');
-  btn.disabled = true; btn.textContent = '↺ Loading…';
+  btn.disabled = true;
+  btn.textContent = currentRange === '30days' ? '↺ Loading 30 days…' : '↺ Loading…';
 
   showTableState('loading');
 
@@ -587,7 +588,7 @@ async function loadOrders() {
     updateMetrics(allOrders);
     renderTable();
     document.getElementById('lastUpdated').textContent =
-      'Updated ' + new Date().toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' });
+      'Updated ' + new Date().toLocaleTimeString('en-GB', { hour:'2-digit', minute:'2-digit' }) + ' · ' + allOrders.length + ' orders';
     checkHealth();
   } catch (err) {
     showTableState('error', err.message);

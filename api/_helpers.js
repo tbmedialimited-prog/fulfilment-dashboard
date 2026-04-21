@@ -2,6 +2,10 @@ const axios = require('axios');
 
 // ─── Mintsoft ────────────────────────────────────────────────────────────────
 // Auth: Ms-Apikey header. Base: https://api.mintsoft.co.uk/api
+// Hard cap: 100 orders per request, no server-side pagination.
+// Workaround: split date range into 6-hour chunks, fetch in parallel.
+// At ~330 orders/day, each 6-hour chunk averages ~80 orders (under the cap).
+
 function mintsoftClient() {
   return axios.create({
     baseURL: 'https://api.mintsoft.co.uk/api',
@@ -16,60 +20,44 @@ function mintsoftClient() {
 
 async function fetchMintsoftOrders(dateFrom, dateTo) {
   const client = mintsoftClient();
-  const PAGE_SIZE = 100;
+  const CHUNK_MS = 6 * 60 * 60 * 1000; // 6 hours per chunk
+
+  // Build chunks
+  const chunks = [];
+  let cursor = new Date(dateFrom);
+  const end = new Date(dateTo);
+  while (cursor < end) {
+    const chunkStart = cursor.toISOString();
+    const chunkEnd = new Date(Math.min(cursor.getTime() + CHUNK_MS, end.getTime())).toISOString();
+    chunks.push({ from: chunkStart, to: chunkEnd });
+    cursor = new Date(cursor.getTime() + CHUNK_MS);
+  }
+
+  // Fetch chunks with concurrency limit of 10 to avoid overwhelming Mintsoft
+  const CONCURRENCY = 10;
   const allOrders = [];
   const seen = new Set();
 
-  // Use POST /Order/Search with pagination — the correct Mintsoft endpoint
-  // Falls back to GET /Order/List if search fails
-  let useSearch = true;
-
-  for (let page = 1; page <= 20; page++) {
-    let pageOrders = [];
-
-    if (useSearch) {
-      try {
-        const r = await client.post('/Order/Search', {
-          OrderDateFrom: dateFrom,
-          OrderDateTo:   dateTo,
-          PageSize:      PAGE_SIZE,
-          PageNumber:    page,
-        });
-        const raw = r.data?.Orders || r.data?.Result || r.data?.Data || r.data;
-        pageOrders = Array.isArray(raw) ? raw : [];
-      } catch (err) {
-        // Search failed — fall back to GET
-        useSearch = false;
-      }
-    }
-
-    if (!useSearch) {
+  for (let i = 0; i < chunks.length; i += CONCURRENCY) {
+    const batch = chunks.slice(i, i + CONCURRENCY);
+    const batchResults = await Promise.all(batch.map(async ({ from, to }) => {
       try {
         const r = await client.get('/Order/List', {
-          params: {
-            DateFrom: dateFrom,
-            DateTo:   dateTo,
-            pageSize: PAGE_SIZE,
-            page,
-          },
+          params: { DateFrom: from, DateTo: to, pageSize: 100 },
         });
-        const raw = r.data?.Orders || r.data?.Result || r.data?.Data || r.data;
-        pageOrders = Array.isArray(raw) ? raw : [];
-      } catch { break; }
-    }
+        return Array.isArray(r.data) ? r.data : [];
+      } catch { return []; }
+    }));
 
-    let newCount = 0;
-    for (const o of pageOrders) {
-      const id = String(o.ID || o.Id || o.OrderId || o.OrderNumber || '');
-      if (!seen.has(id)) {
-        seen.add(id);
-        allOrders.push(o);
-        newCount++;
+    for (const pageOrders of batchResults) {
+      for (const o of pageOrders) {
+        const id = String(o.ID || o.Id || o.OrderId || o.OrderNumber || '');
+        if (id && !seen.has(id)) {
+          seen.add(id);
+          allOrders.push(o);
+        }
       }
     }
-
-    // Stop: last page, no new orders, or cap reached
-    if (pageOrders.length < PAGE_SIZE || newCount === 0 || allOrders.length >= 2000) break;
   }
 
   return allOrders;
@@ -128,28 +116,51 @@ async function enrichOrders(orders) {
   }));
 }
 
+// ─── DPD: GeoPost Meta API ────────────────────────────────────────────────────
+// POST https://api.dpdgroup.com/tracking/v2/parcels
+// Auth: apiKey header (not Bearer). Up to 100 parcel numbers per request.
 async function fetchDpdStatuses(orders) {
   if (!orders.length) return {};
   const map = {};
-  const dpd = axios.create({
-    baseURL: 'https://myadmin.dpdlocal.co.uk/esgServer',
-    headers: { Authorization: `Bearer ${process.env.DPD_API_KEY}`, Accept: 'application/json' },
-    timeout: 8000,
-  });
-  await Promise.all(orders.map(async o => {
+  const BATCH = 100;
+  const trackingNos = orders.map(o => o.tracking);
+
+  for (let i = 0; i < trackingNos.length; i += BATCH) {
+    const batch = trackingNos.slice(i, i + BATCH);
     try {
-      const r = await dpd.get(`/shipping/shipment/${o.tracking}/trackingEvents`);
-      const events = r.data?.data?.shipmentTrackingEvents || [];
-      if (!events.length) { map[o.tracking] = 'In transit'; return; }
-      const { eventCode = '', description = '' } = events[events.length - 1];
-      if (eventCode.toUpperCase() === 'DEL' || description.toLowerCase().includes('delivered')) map[o.tracking] = 'Delivered';
-      else if (eventCode.toUpperCase() === 'DEX' || description.toLowerCase().includes('failed')) map[o.tracking] = 'Failed';
-      else map[o.tracking] = 'In transit';
-    } catch { map[o.tracking] = 'In transit'; }
-  }));
+      const r = await axios.post(
+        'https://api.dpdgroup.com/tracking/v2/parcels',
+        { language: 'EN', parcelNumbers: batch },
+        {
+          headers: {
+            'apiKey':       process.env.DPD_API_KEY,
+            'Content-Type': 'application/json',
+            'Accept':       'application/json',
+          },
+          timeout: 10000,
+        }
+      );
+      const results = Array.isArray(r.data) ? r.data : [];
+      for (const parcel of results) {
+        const tracking = parcel.parcelNumber;
+        if (!tracking) continue;
+        const events = parcel.parcelEvents || [];
+        if (!events.length) { map[tracking] = 'In transit'; continue; }
+        const latest = events[0]; // newest first
+        const family = (latest.statusFamilyLabel || '').toUpperCase();
+        const statusId = (latest.statusId || '').toUpperCase();
+        if (family === 'DELIVERED' || statusId === 'DEY') map[tracking] = 'Delivered';
+        else if (family.includes('RETURN') || family.includes('EXCEPTION') || statusId === 'DEX') map[tracking] = 'Failed';
+        else map[tracking] = 'In transit';
+      }
+    } catch {
+      for (const t of batch) map[t] = 'In transit';
+    }
+  }
   return map;
 }
 
+// ─── Royal Mail: direct header auth ──────────────────────────────────────────
 async function fetchRmStatuses(orders) {
   if (!orders.length) return {};
   const map = {};

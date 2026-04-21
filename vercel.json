@@ -1,7 +1,10 @@
 {
   "version": 2,
   "functions": {
-    "api/*.js": { "maxDuration": 60 }
+    "api/orders.js":   { "maxDuration": 60 },
+    "api/diagnose.js": { "maxDuration": 30 },
+    "api/health.js":   { "maxDuration": 30 },
+    "api/test-dpd.js": { "maxDuration": 30 }
   },
   "routes": [
     { "src": "/api/(.*)", "dest": "/api/$1" },
